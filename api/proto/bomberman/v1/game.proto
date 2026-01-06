@@ -1,0 +1,117 @@
+syntax = "proto3";
+
+package bomberman.game.v1;
+
+option go_package = "bomberman/api/gen/bomberman/v1;gamev1";
+
+// ========== 枚举定义 ==========
+
+enum Direction {
+  DIRECTION_UNSPECIFIED = 0;
+  DIRECTION_UP = 1;
+  DIRECTION_DOWN = 2;
+  DIRECTION_LEFT = 3;
+  DIRECTION_RIGHT = 4;
+}
+
+enum CharacterType {
+  CHARACTER_TYPE_UNSPECIFIED = 0;
+  CHARACTER_TYPE_CLASSIC = 1;
+  CHARACTER_TYPE_SPEEDSTER = 2;
+  // ... 其他角色
+}
+
+// ========== 基础数据结构 ==========
+
+message PlayerState {
+  int32 id = 1;
+  float x = 2; // 使用 float (32位) 足够了
+  float y = 3;
+  Direction direction = 4;
+  bool is_moving = 5;
+  bool dead = 6;
+  CharacterType character = 7;
+}
+
+message BombState {
+  float x = 1;
+  float y = 2;
+  // 倒计时剩余时间(毫秒)，比传时间戳更直观，且不需要对表
+  int32 time_left_ms = 3;
+  int32 explosion_range = 4;
+}
+
+// ========== 顶层消息包 (Envelope Pattern) ==========
+// 这是 Protobuf 替代 interface{} 的标准做法
+message GamePacket {
+  // oneof 保证每次只有一种类型的消息被设置
+  oneof payload {
+    // --- 客户端 -> 服务器 ---
+    ClientInput input = 1;
+    JoinRequest join_req = 2;
+
+    // --- 服务器 -> 客户端 ---
+    ServerState state = 3;
+    GameStart game_start = 4;
+    GameOver game_over = 5;
+    PlayerJoin player_join = 6;
+    PlayerLeave player_leave = 7;
+  }
+}
+
+// ========== 具体消息体 ==========
+
+// 1. 玩家输入 (C -> S)
+message ClientInput {
+  // 优化：MVP版本可以直接发 bool，也可以用位掩码(int32)
+  bool up = 1;
+  bool down = 2;
+  bool left = 3;
+  bool right = 4;
+  bool bomb = 5;
+  int32 seq = 6; // 包序号，用于丢包分析或去重
+}
+
+// 2. 加入请求 (C -> S)
+message JoinRequest {
+  CharacterType character_type = 1;
+}
+
+// 3. 核心：全量状态同步 (S -> C)
+message ServerState {
+  int32 frame_id = 1; // 当前逻辑帧号
+  repeated PlayerState players = 2;
+  repeated BombState bombs = 3;
+
+  // 地图优化：
+  // 1. 不需要每帧都发地图，除非地图被炸毁了。
+  // 2. 如果要发，Proto不支持二维数组，需要扁平化。
+  // 3. 建议：只发送变化的格子，或者 MVP 简单暴力发全量一维数组
+  MapState map = 4;
+}
+
+message MapState {
+  int32 width = 1;
+  int32 height = 2;
+  repeated int32 tiles = 3; // data[y * width + x]
+}
+
+// 4. 游戏开始 (S -> C)
+message GameStart {
+  int32 your_player_id = 1; // 告诉客户端它是谁
+  MapState initial_map = 2; // 初始地图
+}
+
+// 5. 游戏结束 (S -> C)
+message GameOver {
+  int32 winner_id = 1;
+}
+
+// 6. 玩家进出通知
+message PlayerJoin {
+  PlayerState player = 1;
+}
+
+message PlayerLeave {
+  int32 player_id = 1;
+}
