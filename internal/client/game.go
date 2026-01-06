@@ -89,6 +89,11 @@ func (g *Game) AddBomb(bomb *core.Bomb) {
 	g.bombRenderers = append(g.bombRenderers, NewBombRenderer(bomb))
 }
 
+// SetControlScheme 设置控制方案
+func (g *Game) SetControlScheme(scheme ControlScheme) {
+	g.controlScheme = scheme
+}
+
 // Update 更新游戏状态
 func (g *Game) Update() error {
 	if g.gameOver {

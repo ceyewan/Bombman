@@ -29,14 +29,71 @@ func NewClientInput(seq int32, up, down, left, right, bomb bool) *gamev1.GamePac
 }
 
 // NewServerState 构造状态消息
-func NewServerState(frame int32, players []*gamev1.PlayerState, bombs []*gamev1.BombState) *gamev1.GamePacket {
+func NewServerState(frame int32, players []*gamev1.PlayerState, bombs []*gamev1.BombState, explosions []*gamev1.ExplosionState) *gamev1.GamePacket {
 	return &gamev1.GamePacket{
 		Payload: &gamev1.GamePacket_State{
 			State: &gamev1.ServerState{
-				FrameId: frame,
-				Players: players,
-				Bombs:   bombs,
+				FrameId:    frame,
+				Players:    players,
+				Bombs:      bombs,
+				Explosions: explosions,
 				// Map 建议单独处理，或者只在变化时填充
+			},
+		},
+	}
+}
+
+// NewJoinRequest 构造加入请求消息
+func NewJoinRequest(characterType gamev1.CharacterType) *gamev1.GamePacket {
+	return &gamev1.GamePacket{
+		Payload: &gamev1.GamePacket_JoinReq{
+			JoinReq: &gamev1.JoinRequest{
+				CharacterType: characterType,
+			},
+		},
+	}
+}
+
+// NewGameStart 构造游戏开始消息
+func NewGameStart(yourPlayerId int32, initialMap *gamev1.MapState) *gamev1.GamePacket {
+	return &gamev1.GamePacket{
+		Payload: &gamev1.GamePacket_GameStart{
+			GameStart: &gamev1.GameStart{
+				YourPlayerId: yourPlayerId,
+				InitialMap:   initialMap,
+			},
+		},
+	}
+}
+
+// NewGameOver 构造游戏结束消息
+func NewGameOver(winnerId int32) *gamev1.GamePacket {
+	return &gamev1.GamePacket{
+		Payload: &gamev1.GamePacket_GameOver{
+			GameOver: &gamev1.GameOver{
+				WinnerId: winnerId,
+			},
+		},
+	}
+}
+
+// NewPlayerJoin 构造玩家加入消息
+func NewPlayerJoin(player *gamev1.PlayerState) *gamev1.GamePacket {
+	return &gamev1.GamePacket{
+		Payload: &gamev1.GamePacket_PlayerJoin{
+			PlayerJoin: &gamev1.PlayerJoin{
+				Player: player,
+			},
+		},
+	}
+}
+
+// NewPlayerLeave 构造玩家离开消息
+func NewPlayerLeave(playerId int32) *gamev1.GamePacket {
+	return &gamev1.GamePacket{
+		Payload: &gamev1.GamePacket_PlayerLeave{
+			PlayerLeave: &gamev1.PlayerLeave{
+				PlayerId: playerId,
 			},
 		},
 	}
@@ -44,12 +101,12 @@ func NewServerState(frame int32, players []*gamev1.PlayerState, bombs []*gamev1.
 
 // ========== 序列化与反序列化封装 ==========
 
-// Marshal 将消息对象转换为字节切片 (用于 KCP 发送)
+// Marshal 将消息对象转换为字节切片 (用于网络发送)
 func Marshal(pkt *gamev1.GamePacket) ([]byte, error) {
 	return proto.Marshal(pkt)
 }
 
-// Unmarshal 将字节切片转换为消息对象 (用于 KCP 接收)
+// Unmarshal 将字节切片转换为消息对象 (用于网络接收)
 func Unmarshal(data []byte) (*gamev1.GamePacket, error) {
 	pkt := &gamev1.GamePacket{}
 	err := proto.Unmarshal(data, pkt)

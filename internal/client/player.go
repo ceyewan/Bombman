@@ -225,3 +225,23 @@ func (p *Player) ID() int { return p.corePlayer.ID }
 func (p *Player) X() float64 { return p.corePlayer.X }
 func (p *Player) Y() float64 { return p.corePlayer.Y }
 func (p *Player) Character() core.CharacterType { return p.corePlayer.Character }
+
+// UpdateAnimation 更新动画（不处理输入）
+func (p *Player) UpdateAnimation(deltaTime float64) {
+	p.renderer.updateAnimation(deltaTime)
+}
+
+// NewPlayerFromCore 从 core.Player 创建 Player
+func NewPlayerFromCore(corePlayer *core.Player) *Player {
+	renderer := &PlayerRenderer{
+		corePlayer: corePlayer,
+		CharInfo:   GetCharacterInfo(corePlayer.Character),
+		AnimFrame:  0,
+		AnimTime:   0,
+	}
+
+	return &Player{
+		corePlayer: corePlayer,
+		renderer:   renderer,
+	}
+}

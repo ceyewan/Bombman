@@ -6,39 +6,61 @@ option go_package = "bomberman/api/gen/bomberman/v1;gamev1";
 
 // ========== 枚举定义 ==========
 
+// 方向枚举（与 core.Direction 对应）
+// core.DirDown = 0, DirUp = 1, DirLeft = 2, DirRight = 3
 enum Direction {
-  DIRECTION_UNSPECIFIED = 0;
-  DIRECTION_UP = 1;
-  DIRECTION_DOWN = 2;
-  DIRECTION_LEFT = 3;
-  DIRECTION_RIGHT = 4;
+  DIRECTION_UNSPECIFIED = 0;  // 未指定
+  DIRECTION_UP = 1;           // 上 (DirUp)
+  DIRECTION_DOWN = 2;         // 下 (DirDown) - 实际上core中是0，但为了proto兼容性从0开始
+  DIRECTION_LEFT = 3;         // 左 (DirLeft)
+  DIRECTION_RIGHT = 4;        // 右 (DirRight)
 }
 
+// 角色类型枚举（与 core.CharacterType 对应）
+// core.CharacterWhite = 0, CharacterBlack = 1, CharacterRed = 2, CharacterBlue = 3
 enum CharacterType {
-  CHARACTER_TYPE_UNSPECIFIED = 0;
-  CHARACTER_TYPE_CLASSIC = 1;
-  CHARACTER_TYPE_SPEEDSTER = 2;
-  // ... 其他角色
+  CHARACTER_TYPE_UNSPECIFIED = 0;  // 未指定
+  CHARACTER_TYPE_WHITE = 1;        // 经典白色炸弹人 (CharacterWhite)
+  CHARACTER_TYPE_BLACK = 2;        // 暗夜黑战士 (CharacterBlack)
+  CHARACTER_TYPE_RED = 3;          // 烈焰红爆破专家 (CharacterRed)
+  CHARACTER_TYPE_BLUE = 4;         // 冰霜蓝策略大师 (CharacterBlue)
 }
 
 // ========== 基础数据结构 ==========
 
+// 玩家状态（对应 core.Player）
 message PlayerState {
   int32 id = 1;
-  float x = 2; // 使用 float (32位) 足够了
-  float y = 3;
+  double x = 2;           // 使用 double 保持与 core.Player 的 float64 一致
+  double y = 3;
   Direction direction = 4;
   bool is_moving = 5;
   bool dead = 6;
   CharacterType character = 7;
 }
 
+// 炸弹状态（对应 core.Bomb）
 message BombState {
-  float x = 1;
-  float y = 2;
+  double x = 1;           // 使用 double 保持与 core.Bomb 的像素坐标一致
+  double y = 2;
   // 倒计时剩余时间(毫秒)，比传时间戳更直观，且不需要对表
   int32 time_left_ms = 3;
   int32 explosion_range = 4;
+}
+
+// 爆炸状态（对应 core.Explosion）
+message ExplosionState {
+  int32 center_x = 1;     // 中心格子X坐标
+  int32 center_y = 2;     // 中心格子Y坐标
+  int32 range = 3;        // 爆炸范围
+  int64 elapsed_ms = 4;   // 已逝去的时间（毫秒）
+  repeated ExplosionCell cells = 5;  // 爆炸影响的格子列表
+}
+
+// 爆炸格子（对应 core.ExplosionCell）
+message ExplosionCell {
+  int32 grid_x = 1;
+  int32 grid_y = 2;
 }
 
 // ========== 顶层消息包 (Envelope Pattern) ==========
@@ -82,12 +104,13 @@ message ServerState {
   int32 frame_id = 1; // 当前逻辑帧号
   repeated PlayerState players = 2;
   repeated BombState bombs = 3;
+  repeated ExplosionState explosions = 4;  // 新增：爆炸状态列表
 
   // 地图优化：
   // 1. 不需要每帧都发地图，除非地图被炸毁了。
   // 2. 如果要发，Proto不支持二维数组，需要扁平化。
   // 3. 建议：只发送变化的格子，或者 MVP 简单暴力发全量一维数组
-  MapState map = 4;
+  MapState map = 5;
 }
 
 message MapState {
