@@ -23,6 +23,9 @@ type Player struct {
 	Dead                  bool
 	BombCooldownSeconds   float64
 	BombCooldownRemaining float64
+	BombIgnoreGridX       int
+	BombIgnoreGridY       int
+	BombIgnoreActive      bool
 
 	// 服务器同步相关（网络版本使用）
 	NetworkX, NetworkY         float64 // 服务器同步过来的位置
@@ -47,6 +50,9 @@ func NewPlayer(id int, x, y int, charType CharacterType) *Player {
 		Dead:                  false,
 		BombCooldownSeconds:   BombCooldownSeconds,
 		BombCooldownRemaining: 0,
+		BombIgnoreGridX:       0,
+		BombIgnoreGridY:       0,
+		BombIgnoreActive:      false,
 		NetworkX:              float64(x),
 		NetworkY:              float64(y),
 		LastNetworkX:          float64(x),
@@ -115,11 +121,16 @@ func (p *Player) Move(dx, dy float64, game *Game) bool {
 		return false
 	}
 
+	if p.BombIgnoreActive && !p.overlapsGrid(p.BombIgnoreGridX, p.BombIgnoreGridY) {
+		p.BombIgnoreActive = false
+	}
+
 	newX := p.X + dx
 	newY := p.Y + dy
 
 	// 检查碰撞
-	if !game.Map.CanMoveTo(int(newX), int(newY), p.Width, p.Height, getBombGridPositions(game.Bombs)) {
+	bombPositions := getBombGridPositions(game.Bombs, p.BombIgnoreActive, p.BombIgnoreGridX, p.BombIgnoreGridY)
+	if !game.Map.CanMoveTo(int(newX), int(newY), p.Width, p.Height, bombPositions) {
 		return false
 	}
 
@@ -136,6 +147,10 @@ func (p *Player) Move(dx, dy float64, game *Game) bool {
 		p.Direction = DirDown
 	} else if dy < 0 {
 		p.Direction = DirUp
+	}
+
+	if p.BombIgnoreActive && !p.overlapsGrid(p.BombIgnoreGridX, p.BombIgnoreGridY) {
+		p.BombIgnoreActive = false
 	}
 
 	return true
@@ -165,6 +180,9 @@ func (p *Player) PlaceBomb(game *Game) *Bomb {
 	}
 
 	p.BombCooldownRemaining = p.BombCooldownSeconds
+	p.BombIgnoreGridX = gridX
+	p.BombIgnoreGridY = gridY
+	p.BombIgnoreActive = true
 	bomb := NewBomb(gridX, gridY)
 	return bomb
 }
@@ -175,12 +193,34 @@ func (p *Player) GetGridPosition() (int, int) {
 }
 
 // 辅助函数：获取炸弹的格子坐标列表
-func getBombGridPositions(bombs []*Bomb) []struct{ X, Y int } {
-	positions := make([]struct{ X, Y int }, len(bombs))
-	for i, bomb := range bombs {
+func getBombGridPositions(bombs []*Bomb, ignoreActive bool, ignoreX, ignoreY int) []struct{ X, Y int } {
+	positions := make([]struct{ X, Y int }, 0, len(bombs))
+	for _, bomb := range bombs {
 		x, y := bomb.GetGridPosition()
-		positions[i].X = x
-		positions[i].Y = y
+		if ignoreActive && x == ignoreX && y == ignoreY {
+			continue
+		}
+		positions = append(positions, struct{ X, Y int }{X: x, Y: y})
 	}
 	return positions
+}
+
+func (p *Player) overlapsGrid(gridX, gridY int) bool {
+	margin := PlayerMargin
+	width := p.Width - margin*2
+	height := p.Height - margin*2
+	if width <= 0 || height <= 0 {
+		return false
+	}
+
+	px := p.X + float64(margin)
+	py := p.Y + float64(margin)
+	pw := float64(width)
+	ph := float64(height)
+
+	tileX := float64(gridX * TileSize)
+	tileY := float64(gridY * TileSize)
+	tileSize := float64(TileSize)
+
+	return px < tileX+tileSize && px+pw > tileX && py < tileY+tileSize && py+ph > tileY
 }
