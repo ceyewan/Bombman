@@ -105,6 +105,13 @@ func (m *GameMap) CanMoveTo(x, y, width, height int, bombGridPositions []struct{
 		return false
 	}
 
+	// 像素边界检查，避免负坐标被截断成 0
+	maxX := MapWidth * TileSize
+	maxY := MapHeight * TileSize
+	if x < 0 || y < 0 || x+width >= maxX || y+height >= maxY {
+		return false
+	}
+
 	// 检查多个点（四角 + 边中点）
 	checkPoints := []struct{ px, py int }{
 		// 四个角
