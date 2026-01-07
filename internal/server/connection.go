@@ -3,20 +3,26 @@ package server
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	gamev1 "bomberman/api/gen/bomberman/v1"
 	"bomberman/pkg/protocol"
 )
 
 const (
-	MaxPacketSize = 4096 // 最大消息大小
+	MaxPacketSize = 4096             // 最大消息大小
+	readTimeout   = 5 * time.Second  // 读取超时
+	writeTimeout  = 1 * time.Second  // 写入超时
 )
+
+var ErrSendQueueFull = errors.New("发送队列满")
 
 // Connection 表示一个客户端连接
 type Connection struct {
@@ -118,7 +124,7 @@ func (c *Connection) Send(data []byte) error {
 	case c.sendChan <- data:
 		return nil
 	default:
-		return fmt.Errorf("发送队列满")
+		return ErrSendQueueFull
 	}
 }
 
@@ -142,6 +148,7 @@ func (c *Connection) sendLoop(ctx context.Context, wg *sync.WaitGroup) {
 
 			// 发送数据长度前缀（4 字节）
 			length := uint32(len(data))
+			_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 			if err := binary.Write(c.conn, binary.BigEndian, length); err != nil {
 				log.Printf("玩家 %d: 发送长度失败: %v", c.getPlayerID(), err)
 				c.Close()
@@ -149,6 +156,7 @@ func (c *Connection) sendLoop(ctx context.Context, wg *sync.WaitGroup) {
 			}
 
 			// 发送数据体
+			_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 			if _, err := c.conn.Write(data); err != nil {
 				log.Printf("玩家 %d: 发送数据失败: %v", c.getPlayerID(), err)
 				c.Close()
@@ -173,8 +181,11 @@ func (c *Connection) receiveLoop(ctx context.Context, wg *sync.WaitGroup) {
 		default:
 			// 读取消息长度（4 字节）
 			var length uint32
+			_ = c.conn.SetReadDeadline(time.Now().Add(readTimeout))
 			if err := binary.Read(c.conn, binary.BigEndian, &length); err != nil {
-				if err != io.EOF {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					log.Printf("玩家 %d: 读取超时", c.getPlayerID())
+				} else if err != io.EOF {
 					log.Printf("玩家 %d: 读取长度失败: %v", c.getPlayerID(), err)
 				}
 				c.Close()
@@ -195,8 +206,13 @@ func (c *Connection) receiveLoop(ctx context.Context, wg *sync.WaitGroup) {
 
 			// 读取消息体
 			data := make([]byte, length)
+			_ = c.conn.SetReadDeadline(time.Now().Add(readTimeout))
 			if _, err := io.ReadFull(c.conn, data); err != nil {
-				log.Printf("玩家 %d: 读取数据失败: %v", c.getPlayerID(), err)
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					log.Printf("玩家 %d: 读取超时", c.getPlayerID())
+				} else {
+					log.Printf("玩家 %d: 读取数据失败: %v", c.getPlayerID(), err)
+				}
 				c.Close()
 				return
 			}

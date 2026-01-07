@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -24,6 +25,7 @@ type Room struct {
 	connections  map[int32]*Connection
 	nextPlayerID int32
 	inputQueue   map[int32]*gamev1.ClientInput
+	sendQueueFullAt map[int32]time.Time
 
 	joinCh  chan joinRequest
 	inputCh chan inputEvent
@@ -53,6 +55,7 @@ func NewRoom(parent context.Context) *Room {
 		connections:  make(map[int32]*Connection),
 		nextPlayerID: 1,
 		inputQueue:   make(map[int32]*gamev1.ClientInput),
+		sendQueueFullAt: make(map[int32]time.Time),
 		joinCh:       make(chan joinRequest),
 		inputCh:      make(chan inputEvent, 256),
 		leaveCh:      make(chan int32, 256),
@@ -268,6 +271,7 @@ func (r *Room) handleLeave(playerID int32) {
 
 	delete(r.connections, playerID)
 	delete(r.inputQueue, playerID)
+	delete(r.sendQueueFullAt, playerID)
 
 	r.removePlayerByID(playerID)
 
@@ -308,6 +312,7 @@ func (r *Room) resetRoom() {
 	r.nextPlayerID = 1
 	r.connections = make(map[int32]*Connection)
 	r.inputQueue = make(map[int32]*gamev1.ClientInput)
+	r.sendQueueFullAt = make(map[int32]time.Time)
 }
 
 func (r *Room) closeAllConnections(notify bool) {
@@ -343,9 +348,38 @@ func (r *Room) broadcastState() {
 	// 发送到所有连接
 	for _, conn := range r.connections {
 		if err := conn.Send(data); err != nil {
+			if errors.Is(err, ErrSendQueueFull) {
+				r.handleSendQueueFull(conn)
+				continue
+			}
 			log.Printf("发送状态到玩家 %d 失败: %v", conn.getPlayerID(), err)
+			conn.Close()
+			continue
 		}
+		delete(r.sendQueueFullAt, conn.getPlayerID())
 	}
+}
+
+const sendQueueFullGrace = 2 * time.Second
+
+func (r *Room) handleSendQueueFull(conn *Connection) {
+	playerID := conn.getPlayerID()
+	if playerID < 0 {
+		return
+	}
+
+	now := time.Now()
+	if since, ok := r.sendQueueFullAt[playerID]; !ok {
+		r.sendQueueFullAt[playerID] = now
+		log.Printf("玩家 %d 发送队列满，进入宽限期", playerID)
+		return
+	} else if now.Sub(since) < sendQueueFullGrace {
+		return
+	}
+
+	delete(r.sendQueueFullAt, playerID)
+	log.Printf("玩家 %d 发送队列持续满超过 %s，断开连接", playerID, sendQueueFullGrace)
+	conn.Close()
 }
 
 func (r *Room) broadcastGameOver(winnerID int32) {

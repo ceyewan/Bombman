@@ -93,6 +93,9 @@ func main() {
 	// 运行游戏
 	log.Println("游戏启动！")
 	if err := ebiten.RunGame(game); err != nil {
+		if networkClient != nil {
+			networkClient.Close()
+		}
 		log.Fatalf("游戏运行错误: %v", err)
 	}
 }

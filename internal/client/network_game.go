@@ -84,9 +84,12 @@ func (ngc *NetworkGameClient) Layout(outsideWidth, outsideHeight int) (int, int)
 
 // applyServerState 应用服务器状态
 func (ngc *NetworkGameClient) applyServerState(state *gamev1.ServerState) {
+	activePlayers := make(map[int]struct{}, len(state.Players))
+
 	// 同步玩家
 	for _, protoPlayer := range state.Players {
 		playerID := int(protoPlayer.Id)
+		activePlayers[playerID] = struct{}{}
 
 		// 查找或创建玩家
 		playerRenderer, exists := ngc.playersMap[playerID]
@@ -129,6 +132,29 @@ func (ngc *NetworkGameClient) applyServerState(state *gamev1.ServerState) {
 			corePlayer.Direction = protocol.ProtoDirectionToCore(protoPlayer.Direction)
 			corePlayer.IsMoving = protoPlayer.IsMoving
 		}
+	}
+
+	// 移除服务器状态中已不存在的玩家
+	for playerID, playerRenderer := range ngc.playersMap {
+		if _, ok := activePlayers[playerID]; ok {
+			continue
+		}
+
+		for i, p := range ngc.game.players {
+			if p == playerRenderer {
+				ngc.game.players = append(ngc.game.players[:i], ngc.game.players[i+1:]...)
+				break
+			}
+		}
+		for i, p := range ngc.game.coreGame.Players {
+			if p.ID == playerID {
+				ngc.game.coreGame.Players = append(ngc.game.coreGame.Players[:i], ngc.game.coreGame.Players[i+1:]...)
+				break
+			}
+		}
+
+		delete(ngc.playersMap, playerID)
+		log.Printf("玩家 %d 离开（状态同步）", playerID)
 	}
 
 	// 同步炸弹
