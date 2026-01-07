@@ -14,6 +14,7 @@ import (
 	gamev1 "bomberman/api/gen/bomberman/v1"
 	"bomberman/pkg/core"
 	"bomberman/pkg/protocol"
+
 	kcp "github.com/xtaci/kcp-go/v5"
 )
 
@@ -340,23 +341,31 @@ func (nc *NetworkClient) sendMessage(data []byte) error {
 
 // SendInput 发送玩家输入
 func (nc *NetworkClient) SendInput(up, down, left, right, bomb bool) {
+	nc.SendInputWithSeq(up, down, left, right, bomb)
+}
+
+// SendInputWithSeq 发送玩家输入并返回序号
+func (nc *NetworkClient) SendInputWithSeq(up, down, left, right, bomb bool) int32 {
 	if !nc.connected {
-		return
+		return 0
 	}
 
 	nc.inputSeq++
+	seq := nc.inputSeq
 
-	packet := protocol.NewClientInput(nc.inputSeq, up, down, left, right, bomb)
+	packet := protocol.NewClientInput(seq, up, down, left, right, bomb)
 
 	data, err := protocol.Marshal(packet)
 	if err != nil {
 		log.Printf("序列化输入失败: %v", err)
-		return
+		return seq
 	}
 
 	if err := nc.sendMessage(data); err != nil {
 		log.Printf("发送输入失败: %v", err)
 	}
+
+	return seq
 }
 
 // ========== 状态接收 ==========

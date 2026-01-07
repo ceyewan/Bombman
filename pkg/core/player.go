@@ -12,10 +12,18 @@ const (
 	DirRight
 )
 
+// StateSnapshot 状态快照（用于插值缓冲）
+type StateSnapshot struct {
+	Timestamp int64   // 服务器时间戳（毫秒）
+	X, Y      float64 // 位置
+	Direction Direction
+	IsMoving  bool
+}
+
 // Player 玩家（纯逻辑，不包含渲染）
 type Player struct {
 	ID                    int
-	X, Y                  float64 // 玩家当前位置
+	X, Y                  float64 // 玩家当前位置（渲染位置）
 	Width                 int
 	Height                int
 	Speed                 float64 // 像素/秒
@@ -29,12 +37,22 @@ type Player struct {
 	BombIgnoreGridY       int
 	BombIgnoreActive      bool
 
-	// 服务器同步相关（网络版本使用）
+	// ========== 网络同步相关 ==========
+
+	// 插值缓冲区（远端玩家使用）
+	StateBuffer     []StateSnapshot // 状态快照队列
+	RenderTimestamp int64           // 当前渲染时间点（服务器时间 - 延迟）
+
+	// 航位推测
+	LastVelocityX, LastVelocityY float64 // 最后已知速度（像素/毫秒）
+	LastUpdateTimestamp          int64   // 最后更新时间戳
+
+	// 旧字段（保留向后兼容，但将逐步弃用）
 	NetworkX, NetworkY         float64 // 服务器同步过来的位置
 	LastNetworkX, LastNetworkY float64
 	LerpProgress               float64 // 插值进度 (0.0 ~ 1.0)
 	LerpSpeed                  float64 // 插值速度
-	IsSimulated                bool    // true表示由服务器控制
+	IsSimulated                bool    // true表示由服务器控制（远端玩家）
 }
 
 // NewPlayer 创建新玩家
@@ -55,13 +73,20 @@ func NewPlayer(id int, x, y int, charType CharacterType) *Player {
 		BombIgnoreGridX:       0,
 		BombIgnoreGridY:       0,
 		BombIgnoreActive:      false,
-		NetworkX:              float64(x),
-		NetworkY:              float64(y),
-		LastNetworkX:          float64(x),
-		LastNetworkY:          float64(y),
-		LerpProgress:          1.0,
-		LerpSpeed:             PlayerDefaultSpeed,
-		IsSimulated:           false,
+		// 插值缓冲区
+		StateBuffer:         make([]StateSnapshot, 0, InterpolationBufferSize),
+		RenderTimestamp:     0,
+		LastVelocityX:       0,
+		LastVelocityY:       0,
+		LastUpdateTimestamp: 0,
+		// 旧字段（兼容）
+		NetworkX:     float64(x),
+		NetworkY:     float64(y),
+		LastNetworkX: float64(x),
+		LastNetworkY: float64(y),
+		LerpProgress: 1.0,
+		LerpSpeed:    PlayerDefaultSpeed,
+		IsSimulated:  false,
 	}
 }
 
@@ -78,16 +103,118 @@ func (p *Player) Update(deltaTime float64, game *Game) {
 		}
 	}
 
-	if p.IsSimulated {
-		// 模拟玩家（服务器控制），使用插值
-		p.updateLerp(deltaTime)
-	} else {
-		// 本地玩家，由客户端控制移动
-		// 实际移动逻辑由客户端处理
+	// 远端玩家使用新的插值缓冲系统
+	// 本地玩家由客户端预测系统控制，这里不处理
+}
+
+// ========== 插值缓冲系统（远端玩家）==========
+
+// AddStateSnapshot 添加状态快照到缓冲区
+func (p *Player) AddStateSnapshot(timestamp int64, x, y float64, dir Direction, isMoving bool) {
+	snapshot := StateSnapshot{
+		Timestamp: timestamp,
+		X:         x,
+		Y:         y,
+		Direction: dir,
+		IsMoving:  isMoving,
+	}
+
+	// 计算速度（用于航位推测）
+	if len(p.StateBuffer) > 0 {
+		last := p.StateBuffer[len(p.StateBuffer)-1]
+		dt := float64(timestamp - last.Timestamp)
+		if dt > 0 {
+			p.LastVelocityX = (x - last.X) / dt
+			p.LastVelocityY = (y - last.Y) / dt
+		}
+	}
+	p.LastUpdateTimestamp = timestamp
+
+	// 添加到缓冲区
+	p.StateBuffer = append(p.StateBuffer, snapshot)
+
+	// 限制缓冲区大小
+	if len(p.StateBuffer) > InterpolationBufferSize {
+		p.StateBuffer = p.StateBuffer[1:]
 	}
 }
 
-// updateLerp 更新插值位置
+// UpdateInterpolation 更新插值位置（远端玩家每帧调用）
+// serverTimeMs: 当前服务器时间（毫秒）
+func (p *Player) UpdateInterpolation(serverTimeMs int64) {
+	if !p.IsSimulated || len(p.StateBuffer) == 0 {
+		return
+	}
+
+	// 渲染时间 = 服务器时间 - 插值延迟
+	renderTime := serverTimeMs - InterpolationDelayMs
+	p.RenderTimestamp = renderTime
+
+	// 在缓冲区中找到 renderTime 两侧的快照
+	var prev, next *StateSnapshot
+	for i := 0; i < len(p.StateBuffer)-1; i++ {
+		if p.StateBuffer[i].Timestamp <= renderTime && p.StateBuffer[i+1].Timestamp >= renderTime {
+			prev = &p.StateBuffer[i]
+			next = &p.StateBuffer[i+1]
+			break
+		}
+	}
+
+	if prev != nil && next != nil {
+		// 正常插值
+		totalTime := float64(next.Timestamp - prev.Timestamp)
+		if totalTime > 0 {
+			alpha := float64(renderTime-prev.Timestamp) / totalTime
+			p.X = prev.X + (next.X-prev.X)*alpha
+			p.Y = prev.Y + (next.Y-prev.Y)*alpha
+			p.Direction = next.Direction
+			p.IsMoving = next.IsMoving
+		}
+	} else if len(p.StateBuffer) > 0 {
+		// 缓冲区不足或渲染时间超出范围，使用航位推测
+		last := p.StateBuffer[len(p.StateBuffer)-1]
+		timeSinceLast := serverTimeMs - last.Timestamp
+
+		if timeSinceLast <= DeadReckoningMaxMs {
+			// 航位推测：基于最后速度预测位置
+			p.X = last.X + p.LastVelocityX*float64(timeSinceLast)
+			p.Y = last.Y + p.LastVelocityY*float64(timeSinceLast)
+			p.Direction = last.Direction
+			p.IsMoving = last.IsMoving
+		} else {
+			// 超时，停止在最后已知位置
+			p.X = last.X
+			p.Y = last.Y
+			p.Direction = last.Direction
+			p.IsMoving = false
+		}
+	}
+
+	// 清理过期快照（保留 renderTime 之前的最后一个）
+	p.cleanupOldSnapshots(renderTime)
+}
+
+// cleanupOldSnapshots 清理过期的快照
+func (p *Player) cleanupOldSnapshots(renderTime int64) {
+	// 找到最后一个 <= renderTime 的快照索引
+	cutoff := -1
+	for i := 0; i < len(p.StateBuffer); i++ {
+		if p.StateBuffer[i].Timestamp <= renderTime {
+			cutoff = i
+		} else {
+			break
+		}
+	}
+
+	// 保留 cutoff 及之后的快照（cutoff 用于插值的 prev）
+	if cutoff > 0 {
+		p.StateBuffer = p.StateBuffer[cutoff:]
+	}
+}
+
+// ========== 旧版插值（兼容，将逐步弃用）==========
+
+// updateLerp 更新插值位置（旧版本，保留兼容）
 func (p *Player) updateLerp(deltaTime float64) {
 	if p.LerpProgress < 1.0 {
 		p.LerpProgress += deltaTime * p.LerpSpeed
@@ -108,7 +235,7 @@ func (p *Player) updateLerp(deltaTime float64) {
 	}
 }
 
-// SetNetworkPosition 设置服务器同步的位置
+// SetNetworkPosition 设置服务器同步的位置（旧版本，保留兼容）
 func (p *Player) SetNetworkPosition(x, y float64) {
 	p.LastNetworkX = p.NetworkX
 	p.LastNetworkY = p.NetworkY

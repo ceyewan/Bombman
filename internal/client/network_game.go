@@ -2,6 +2,8 @@ package client
 
 import (
 	"log"
+	"math"
+	"time"
 
 	gamev1 "bomberman/api/gen/bomberman/v1"
 	"bomberman/pkg/core"
@@ -10,12 +12,35 @@ import (
 	"github.com/hajimehoshi/ebiten/v2"
 )
 
+// PendingInput 待确认的输入（用于客户端预测重放）
+type PendingInput struct {
+	Seq   int32
+	Up    bool
+	Down  bool
+	Left  bool
+	Right bool
+	Bomb  bool
+}
+
 // NetworkGameClient 联机游戏客户端（与现有 Game 兼容）
 type NetworkGameClient struct {
 	game       *Game // 复用现有的 Game 结构
 	network    *NetworkClient
 	playerID   int
 	playersMap map[int]*Player // 玩家 ID -> Player
+
+	// ========== 客户端预测相关 ==========
+	pendingInputs       []PendingInput // 未被服务器确认的输入队列
+	lastConfirmedSeq    int32          // 服务器已确认的最后输入序号
+	lastServerX         float64        // 服务器确认的最后位置
+	lastServerY         float64
+	reconciliationDiffX float64 // 平滑纠错的残余差值
+	reconciliationDiffY float64
+
+	// ========== 插值缓冲相关 ==========
+	serverTimeMs       int64 // 估算的服务器当前时间（毫秒）
+	localTimeOffsetMs  int64 // 本地时间与服务器时间的差值
+	lastStateReceiveMs int64 // 上次收到状态的本地时间
 }
 
 // NewNetworkGameClient 创建联机游戏客户端
@@ -29,10 +54,15 @@ func NewNetworkGameClient(network *NetworkClient, controlScheme ControlScheme) (
 	game.coreGame.IsAuthoritative = false
 
 	client := &NetworkGameClient{
-		game:       game,
-		network:    network,
-		playerID:   int(network.GetPlayerID()),
-		playersMap: make(map[int]*Player),
+		game:               game,
+		network:            network,
+		playerID:           int(network.GetPlayerID()),
+		playersMap:         make(map[int]*Player),
+		pendingInputs:      make([]PendingInput, 0, core.InputBufferSize),
+		lastConfirmedSeq:   0,
+		serverTimeMs:       0,
+		localTimeOffsetMs:  0,
+		lastStateReceiveMs: 0,
 	}
 
 	// 使用服务器下发的初始地图
@@ -52,21 +82,27 @@ func (ngc *NetworkGameClient) Update() error {
 		ngc.applyServerState(state)
 	}
 
-	// 2. 处理本地输入并发送到服务器
-	ngc.handleInput()
+	// 2. 处理本地输入：立即应用（客户端预测）并发送到服务器
+	ngc.handleInputWithPrediction()
 
-	// 3. 更新游戏逻辑（用于插值）
+	// 3. 应用平滑纠错（Reconciliation 的残余差值）
+	ngc.applySmoothReconciliation()
+
+	// 4. 更新远端玩家的插值
+	ngc.updateRemotePlayersInterpolation()
+
+	// 5. 更新游戏逻辑（炸弹冷却等）
 	ngc.game.coreGame.Update(1.0 / FPS)
 
-	// 4. 同步渲染器
+	// 6. 同步渲染器
 	ngc.game.syncRenderers()
 
-	// 5. 更新玩家动画（非输入）
+	// 7. 更新玩家动画
 	for _, player := range ngc.game.players {
 		player.UpdateAnimation(1.0 / FPS)
 	}
 
-	// 6. 处理网络事件
+	// 8. 处理网络事件
 	ngc.handleNetworkEvents()
 
 	return nil
@@ -84,6 +120,14 @@ func (ngc *NetworkGameClient) Layout(outsideWidth, outsideHeight int) (int, int)
 
 // applyServerState 应用服务器状态
 func (ngc *NetworkGameClient) applyServerState(state *gamev1.ServerState) {
+	// 更新服务器时间估算
+	localNow := time.Now().UnixMilli()
+	if state.ServerTimeMs > 0 {
+		ngc.serverTimeMs = state.ServerTimeMs
+		ngc.localTimeOffsetMs = localNow - state.ServerTimeMs
+	}
+	ngc.lastStateReceiveMs = localNow
+
 	activePlayers := make(map[int]struct{}, len(state.Players))
 
 	// 同步玩家
@@ -101,10 +145,10 @@ func (ngc *NetworkGameClient) applyServerState(state *gamev1.ServerState) {
 			}
 
 			if playerID == ngc.playerID {
-				// 本地玩家：不插值
+				// 本地玩家：不使用插值，由客户端预测控制
 				corePlayer.IsSimulated = false
 			} else {
-				// 其他玩家：使用插值
+				// 其他玩家：使用插值缓冲
 				corePlayer.IsSimulated = true
 			}
 
@@ -117,20 +161,20 @@ func (ngc *NetworkGameClient) applyServerState(state *gamev1.ServerState) {
 
 		// 更新玩家状态
 		corePlayer := playerRenderer.corePlayer
+
 		if playerID == ngc.playerID {
-			// 本地玩家：直接使用服务器权威状态
-			corePlayer.X = protoPlayer.X
-			corePlayer.Y = protoPlayer.Y
-			corePlayer.Direction = protocol.ProtoDirectionToCore(protoPlayer.Direction)
-			corePlayer.IsMoving = protoPlayer.IsMoving
-			corePlayer.Dead = protoPlayer.Dead
-			corePlayer.Character = protocol.ProtoCharacterTypeToCore(protoPlayer.Character)
+			// ========== 本地玩家：客户端预测 + Reconciliation ==========
+			ngc.reconcileLocalPlayer(corePlayer, protoPlayer, state)
 		} else {
-			// 其他玩家：使用插值
-			corePlayer.SetNetworkPosition(protoPlayer.X, protoPlayer.Y)
+			// ========== 远端玩家：添加到插值缓冲区 ==========
+			corePlayer.AddStateSnapshot(
+				state.ServerTimeMs,
+				protoPlayer.X,
+				protoPlayer.Y,
+				protocol.ProtoDirectionToCore(protoPlayer.Direction),
+				protoPlayer.IsMoving,
+			)
 			corePlayer.Dead = protoPlayer.Dead
-			corePlayer.Direction = protocol.ProtoDirectionToCore(protoPlayer.Direction)
-			corePlayer.IsMoving = protoPlayer.IsMoving
 		}
 	}
 
@@ -166,6 +210,151 @@ func (ngc *NetworkGameClient) applyServerState(state *gamev1.ServerState) {
 	// 同步地图（如果有）
 	if state.Map != nil {
 		ngc.syncMap(state.Map)
+	}
+}
+
+// reconcileLocalPlayer 本地玩家的状态校验和回滚
+func (ngc *NetworkGameClient) reconcileLocalPlayer(corePlayer *core.Player, protoPlayer *gamev1.PlayerState, state *gamev1.ServerState) {
+	// 获取服务器已确认的输入序号
+	confirmedSeq := int32(0)
+	if state.LastProcessedInputSeq != nil {
+		if seq, ok := state.LastProcessedInputSeq[int32(ngc.playerID)]; ok {
+			confirmedSeq = seq
+		}
+	}
+
+	// 服务器权威位置
+	serverX := protoPlayer.X
+	serverY := protoPlayer.Y
+
+	// 更新死亡、方向等非位置状态（这些不需要预测）
+	corePlayer.Dead = protoPlayer.Dead
+	corePlayer.Character = protocol.ProtoCharacterTypeToCore(protoPlayer.Character)
+
+	// 如果死亡，直接同步位置
+	if corePlayer.Dead {
+		corePlayer.X = serverX
+		corePlayer.Y = serverY
+		ngc.pendingInputs = ngc.pendingInputs[:0]
+		return
+	}
+
+	// 移除已确认的输入
+	newPendingInputs := make([]PendingInput, 0, len(ngc.pendingInputs))
+	for _, input := range ngc.pendingInputs {
+		if input.Seq > confirmedSeq {
+			newPendingInputs = append(newPendingInputs, input)
+		}
+	}
+	ngc.pendingInputs = newPendingInputs
+	ngc.lastConfirmedSeq = confirmedSeq
+
+	// 计算预测误差
+	predictedX := corePlayer.X
+	predictedY := corePlayer.Y
+
+	// 先回滚到服务器位置
+	corePlayer.X = serverX
+	corePlayer.Y = serverY
+
+	// 重放未确认的输入
+	for _, input := range ngc.pendingInputs {
+		dx, dy := ngc.calculateMoveDelta(input)
+		corePlayer.Move(dx, dy, ngc.game.coreGame)
+	}
+
+	// 重放后的位置
+	replayedX := corePlayer.X
+	replayedY := corePlayer.Y
+
+	// 计算误差
+	errorX := replayedX - predictedX
+	errorY := replayedY - predictedY
+	errorDist := math.Sqrt(errorX*errorX + errorY*errorY)
+
+	if errorDist > core.ReconciliationSmoothThreshold {
+		// 误差过大，直接拉回到重放后的位置
+		// 位置已经是 replayedX, replayedY，无需修改
+		ngc.reconciliationDiffX = 0
+		ngc.reconciliationDiffY = 0
+	} else if errorDist > 0.1 {
+		// 小误差，使用平滑纠错
+		// 保持当前预测位置，设置差值让后续帧平滑修正
+		corePlayer.X = predictedX
+		corePlayer.Y = predictedY
+		ngc.reconciliationDiffX = replayedX - predictedX
+		ngc.reconciliationDiffY = replayedY - predictedY
+	}
+	// 误差极小，无需任何纠正
+}
+
+// calculateMoveDelta 根据输入计算移动增量
+func (ngc *NetworkGameClient) calculateMoveDelta(input PendingInput) (float64, float64) {
+	deltaTime := 1.0 / FPS
+	speed := core.PlayerDefaultSpeed * deltaTime
+
+	dx, dy := 0.0, 0.0
+	if input.Up {
+		dy = -speed
+	}
+	if input.Down {
+		dy = speed
+	}
+	if input.Left {
+		dx = -speed
+	}
+	if input.Right {
+		dx = speed
+	}
+
+	return dx, dy
+}
+
+// applySmoothReconciliation 应用平滑纠错
+func (ngc *NetworkGameClient) applySmoothReconciliation() {
+	if ngc.reconciliationDiffX == 0 && ngc.reconciliationDiffY == 0 {
+		return
+	}
+
+	localPlayer := ngc.playersMap[ngc.playerID]
+	if localPlayer == nil {
+		return
+	}
+
+	corePlayer := localPlayer.corePlayer
+
+	// 每帧修正一部分差值
+	correctionX := ngc.reconciliationDiffX * core.ReconciliationSmoothFactor
+	correctionY := ngc.reconciliationDiffY * core.ReconciliationSmoothFactor
+
+	corePlayer.X += correctionX
+	corePlayer.Y += correctionY
+
+	ngc.reconciliationDiffX -= correctionX
+	ngc.reconciliationDiffY -= correctionY
+
+	// 残余差值很小时归零
+	if math.Abs(ngc.reconciliationDiffX) < 0.1 && math.Abs(ngc.reconciliationDiffY) < 0.1 {
+		ngc.reconciliationDiffX = 0
+		ngc.reconciliationDiffY = 0
+	}
+}
+
+// updateRemotePlayersInterpolation 更新远端玩家的插值
+func (ngc *NetworkGameClient) updateRemotePlayersInterpolation() {
+	// 估算当前服务器时间
+	localNow := time.Now().UnixMilli()
+	estimatedServerTime := localNow - ngc.localTimeOffsetMs
+
+	for playerID, playerRenderer := range ngc.playersMap {
+		if playerID == ngc.playerID {
+			continue // 跳过本地玩家
+		}
+
+		corePlayer := playerRenderer.corePlayer
+		if corePlayer.IsSimulated {
+			corePlayer.UpdateInterpolation(estimatedServerTime)
+		}
 	}
 }
 
@@ -218,8 +407,8 @@ func (ngc *NetworkGameClient) syncMap(protoMap *gamev1.MapState) {
 	ngc.game.mapRenderer = NewMapRenderer(gameMap)
 }
 
-// handleInput 处理输入并发送到服务器
-func (ngc *NetworkGameClient) handleInput() {
+// handleInputWithPrediction 处理输入：立即应用（客户端预测）并发送到服务器
+func (ngc *NetworkGameClient) handleInputWithPrediction() {
 	// 获取本地玩家
 	localPlayer := ngc.playersMap[ngc.playerID]
 	if localPlayer == nil || localPlayer.corePlayer.Dead {
@@ -229,8 +418,46 @@ func (ngc *NetworkGameClient) handleInput() {
 	// 获取输入状态
 	up, down, left, right, bomb := getInputState(ngc.game.controlScheme)
 
-	// 发送输入到服务器
-	ngc.network.SendInput(up, down, left, right, bomb)
+	// 发送输入到服务器（会自动递增 seq）
+	seq := ngc.network.SendInputWithSeq(up, down, left, right, bomb)
+
+	// 只有有移动输入时才记录
+	if up || down || left || right {
+		// 保存到待确认队列
+		pendingInput := PendingInput{
+			Seq:   seq,
+			Up:    up,
+			Down:  down,
+			Left:  left,
+			Right: right,
+			Bomb:  bomb,
+		}
+		ngc.pendingInputs = append(ngc.pendingInputs, pendingInput)
+
+		// 限制队列大小
+		if len(ngc.pendingInputs) > core.InputBufferSize {
+			ngc.pendingInputs = ngc.pendingInputs[1:]
+		}
+
+		// 立即应用移动（客户端预测）
+		dx, dy := ngc.calculateMoveDelta(pendingInput)
+		corePlayer := localPlayer.corePlayer
+		corePlayer.Move(dx, dy, ngc.game.coreGame)
+
+		// 更新方向和移动状态
+		if dx > 0 {
+			corePlayer.Direction = core.DirRight
+		} else if dx < 0 {
+			corePlayer.Direction = core.DirLeft
+		} else if dy > 0 {
+			corePlayer.Direction = core.DirDown
+		} else if dy < 0 {
+			corePlayer.Direction = core.DirUp
+		}
+		corePlayer.IsMoving = true
+	} else {
+		localPlayer.corePlayer.IsMoving = false
+	}
 }
 
 // handleNetworkEvents 处理网络事件

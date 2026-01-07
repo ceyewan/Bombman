@@ -30,13 +30,27 @@ func NewClientInput(seq int32, up, down, left, right, bomb bool) *gamev1.GamePac
 
 // NewServerState 构造状态消息
 func NewServerState(frame int32, players []*gamev1.PlayerState, bombs []*gamev1.BombState, explosions []*gamev1.ExplosionState) *gamev1.GamePacket {
+	return NewServerStateWithMeta(frame, players, bombs, explosions, nil, 0)
+}
+
+// NewServerStateWithMeta 构造状态消息（带客户端预测支持）
+func NewServerStateWithMeta(
+	frame int32,
+	players []*gamev1.PlayerState,
+	bombs []*gamev1.BombState,
+	explosions []*gamev1.ExplosionState,
+	lastProcessedInputSeq map[int32]int32,
+	serverTimeMs int64,
+) *gamev1.GamePacket {
 	return &gamev1.GamePacket{
 		Payload: &gamev1.GamePacket_State{
 			State: &gamev1.ServerState{
-				FrameId:    frame,
-				Players:    players,
-				Bombs:      bombs,
-				Explosions: explosions,
+				FrameId:               frame,
+				Players:               players,
+				Bombs:                 bombs,
+				Explosions:            explosions,
+				LastProcessedInputSeq: lastProcessedInputSeq,
+				ServerTimeMs:          serverTimeMs,
 				// Map 建议单独处理，或者只在变化时填充
 			},
 		},

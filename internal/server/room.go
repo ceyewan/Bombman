@@ -22,10 +22,13 @@ type Room struct {
 	state   GameState
 	resetAt time.Time
 
-	connections  map[int32]*Connection
-	nextPlayerID int32
-	inputQueue   map[int32]*gamev1.ClientInput
+	connections     map[int32]*Connection
+	nextPlayerID    int32
+	inputQueue      map[int32]*gamev1.ClientInput
 	sendQueueFullAt map[int32]time.Time
+
+	// 客户端预测支持：记录每个玩家最后处理的输入序号
+	lastProcessedInputSeq map[int32]int32
 
 	joinCh  chan joinRequest
 	inputCh chan inputEvent
@@ -47,18 +50,19 @@ func NewRoom(parent context.Context) *Room {
 	ctx, cancel := context.WithCancel(parent)
 
 	return &Room{
-		ctx:          ctx,
-		cancel:       cancel,
-		game:         core.NewGame(),
-		frameID:      0,
-		state:        StateWaiting,
-		connections:  make(map[int32]*Connection),
-		nextPlayerID: 1,
-		inputQueue:   make(map[int32]*gamev1.ClientInput),
-		sendQueueFullAt: make(map[int32]time.Time),
-		joinCh:       make(chan joinRequest),
-		inputCh:      make(chan inputEvent, 256),
-		leaveCh:      make(chan int32, 256),
+		ctx:                   ctx,
+		cancel:                cancel,
+		game:                  core.NewGame(),
+		frameID:               0,
+		state:                 StateWaiting,
+		connections:           make(map[int32]*Connection),
+		nextPlayerID:          1,
+		inputQueue:            make(map[int32]*gamev1.ClientInput),
+		sendQueueFullAt:       make(map[int32]time.Time),
+		lastProcessedInputSeq: make(map[int32]int32),
+		joinCh:                make(chan joinRequest),
+		inputCh:               make(chan inputEvent, 256),
+		leaveCh:               make(chan int32, 256),
 	}
 }
 
@@ -168,6 +172,10 @@ func (r *Room) applyInputs() {
 
 	for playerID, input := range inputs {
 		r.applyInput(playerID, input)
+		// 记录已处理的输入序号
+		if input.Seq > r.lastProcessedInputSeq[playerID] {
+			r.lastProcessedInputSeq[playerID] = input.Seq
+		}
 	}
 }
 
@@ -272,6 +280,7 @@ func (r *Room) handleLeave(playerID int32) {
 	delete(r.connections, playerID)
 	delete(r.inputQueue, playerID)
 	delete(r.sendQueueFullAt, playerID)
+	delete(r.lastProcessedInputSeq, playerID)
 
 	r.removePlayerByID(playerID)
 
@@ -313,6 +322,7 @@ func (r *Room) resetRoom() {
 	r.connections = make(map[int32]*Connection)
 	r.inputQueue = make(map[int32]*gamev1.ClientInput)
 	r.sendQueueFullAt = make(map[int32]time.Time)
+	r.lastProcessedInputSeq = make(map[int32]int32)
 }
 
 func (r *Room) closeAllConnections(notify bool) {
@@ -335,8 +345,18 @@ func (r *Room) broadcastState() {
 	// 转换爆炸列表
 	protoExplosions := protocol.CoreExplosionsToProto(r.game.Explosions)
 
-	// 构造 ServerState 消息
-	packet := protocol.NewServerState(r.frameID, protoPlayers, protoBombs, protoExplosions)
+	// 服务器当前时间（毫秒）
+	serverTimeMs := time.Now().UnixMilli()
+
+	// 构造 ServerState 消息（带客户端预测支持）
+	packet := protocol.NewServerStateWithMeta(
+		r.frameID,
+		protoPlayers,
+		protoBombs,
+		protoExplosions,
+		r.lastProcessedInputSeq,
+		serverTimeMs,
+	)
 
 	// 序列化
 	data, err := protocol.Marshal(packet)
