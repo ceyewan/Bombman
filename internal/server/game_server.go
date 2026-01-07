@@ -33,6 +33,7 @@ type GameServer struct {
 	// 游戏状态
 	game    *core.Game
 	frameId int32
+	gameMu  sync.RWMutex
 
 	// 连接管理
 	connections  map[int32]*Connection // playerID -> Connection
@@ -59,15 +60,15 @@ func NewGameServer(addr string) *GameServer {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &GameServer{
-		game:         core.NewGame(),
-		frameId:      0,
-		connections:  make(map[int32]*Connection),
-		nextPlayerID: 1,
-		state:        StateWaiting,
-		addr:         addr,
-		ctx:          ctx,
-		cancel:       cancel,
-		shutdown:     make(chan struct{}),
+		game:         core.NewGame(),              // 初始化游戏状态
+		frameId:      0,                           // 初始帧 ID
+		connections:  make(map[int32]*Connection), // 初始化连接映射
+		nextPlayerID: 1,                           // 玩家 ID 从 1 开始
+		state:        StateWaiting,                // 初始状态为等待
+		addr:         addr,                        // 监听地址
+		ctx:          ctx,                         // 上下文
+		cancel:       cancel,                      // 取消函数
+		shutdown:     make(chan struct{}),         // 关闭信号
 	}
 }
 
@@ -191,14 +192,22 @@ func (s *GameServer) updateGame() {
 	// 固定时间步长
 	deltaTime := 1.0 / ServerTPS
 
+	var shouldEnd bool
+	var winnerID int32
+
+	s.gameMu.Lock()
 	// 更新核心游戏逻辑
 	s.game.Update(deltaTime)
 
 	// 增加帧 ID
 	s.frameId++
 
-	// 检查游戏是否结束
-	s.checkGameOver()
+	shouldEnd, winnerID = s.checkGameOverLocked()
+	s.gameMu.Unlock()
+
+	if shouldEnd {
+		s.handleGameOver(winnerID)
+	}
 }
 
 // broadcastState 广播游戏状态到所有客户端
@@ -207,6 +216,8 @@ func (s *GameServer) broadcastState() {
 		return
 	}
 
+	s.gameMu.RLock()
+	frameID := s.frameId
 	// 转换玩家列表
 	protoPlayers := protocol.CorePlayersToProto(s.game.Players)
 
@@ -215,9 +226,10 @@ func (s *GameServer) broadcastState() {
 
 	// 转换爆炸列表
 	protoExplosions := protocol.CoreExplosionsToProto(s.game.Explosions)
+	s.gameMu.RUnlock()
 
 	// 构造 ServerState 消息
-	packet := protocol.NewServerState(s.frameId, protoPlayers, protoBombs, protoExplosions)
+	packet := protocol.NewServerState(frameID, protoPlayers, protoBombs, protoExplosions)
 
 	// 序列化
 	data, err := protocol.Marshal(packet)
@@ -227,37 +239,11 @@ func (s *GameServer) broadcastState() {
 	}
 
 	// 发送到所有连接
-	s.connMutex.RLock()
-	for _, conn := range s.connections {
+	conns := s.snapshotConnections()
+	for _, conn := range conns {
 		if err := conn.Send(data); err != nil {
-			log.Printf("发送状态到玩家 %d 失败: %v", conn.playerID, err)
+			log.Printf("发送状态到玩家 %d 失败: %v", conn.getPlayerID(), err)
 		}
-	}
-	s.connMutex.RUnlock()
-}
-
-// checkGameOver 检查是否需要结束游戏（单人训练模式）
-func (s *GameServer) checkGameOver() {
-	if s.getState() != StateRunning {
-		return
-	}
-
-	total, alive, winnerID := s.countPlayersAlive()
-	if total == 0 {
-		return
-	}
-
-	// 单人训练：只有死亡才结束
-	if total == 1 {
-		if alive == 0 {
-			s.handleGameOver(-1)
-		}
-		return
-	}
-
-	// 多人对战：只剩 0/1 人时结束
-	if alive <= 1 {
-		s.handleGameOver(winnerID)
 	}
 }
 
@@ -279,10 +265,10 @@ func (s *GameServer) handleGameOver(winnerID int32) {
 // addPlayer 添加玩家
 func (s *GameServer) addPlayer(conn *Connection, characterType core.CharacterType) (int32, error) {
 	s.connMutex.Lock()
-	defer s.connMutex.Unlock()
 
 	// 检查是否已满
 	if len(s.connections) >= MaxPlayers {
+		s.connMutex.Unlock()
 		return 0, fmt.Errorf("服务器已满 (%d/%d)", len(s.connections), MaxPlayers)
 	}
 
@@ -297,12 +283,15 @@ func (s *GameServer) addPlayer(conn *Connection, characterType core.CharacterTyp
 	player := core.NewPlayer(int(playerID), x, y, characterType)
 	player.IsSimulated = false // 服务器直接驱动
 
-	// 添加到游戏
-	s.game.AddPlayer(player)
-
 	// 保存连接
-	conn.playerID = playerID
+	conn.setPlayerID(playerID)
 	s.connections[playerID] = conn
+	s.connMutex.Unlock()
+
+	// 添加到游戏
+	s.gameMu.Lock()
+	s.game.AddPlayer(player)
+	s.gameMu.Unlock()
 
 	log.Printf("玩家 %d 加入，角色: %s, 出生点: (%d, %d)", playerID, characterType, x, y)
 
@@ -311,47 +300,52 @@ func (s *GameServer) addPlayer(conn *Connection, characterType core.CharacterTyp
 
 // removePlayer 移除玩家
 func (s *GameServer) removePlayer(playerID int32) {
+	var conns []*Connection
+	var remainingConnections int
+
 	s.connMutex.Lock()
-	defer s.connMutex.Unlock()
 
 	_, exists := s.connections[playerID]
 	if !exists {
+		s.connMutex.Unlock()
 		return
 	}
 
 	// 从地图中删除连接
 	delete(s.connections, playerID)
+	remainingConnections = len(s.connections)
+
+	conns = make([]*Connection, 0, len(s.connections))
+	for _, conn := range s.connections {
+		conns = append(conns, conn)
+	}
+	s.connMutex.Unlock()
 
 	// 从游戏中删除玩家
+	var remainingPlayers int
+	s.gameMu.Lock()
 	for i, player := range s.game.Players {
 		if player.ID == int(playerID) {
 			s.game.Players = append(s.game.Players[:i], s.game.Players[i+1:]...)
 			break
 		}
 	}
+	remainingPlayers = len(s.game.Players)
+	s.gameMu.Unlock()
 
-	log.Printf("玩家 %d 离开，当前玩家数: %d", playerID, len(s.connections))
+	log.Printf("玩家 %d 离开，当前玩家数: %d", playerID, remainingConnections)
 
 	// 广播玩家离开消息
 	packet := protocol.NewPlayerLeave(playerID)
 	data, _ := protocol.Marshal(packet)
 
-	for _, c := range s.connections {
+	for _, c := range conns {
 		c.Send(data)
 	}
-}
 
-// getPlayer 获取玩家
-func (s *GameServer) getPlayer(playerID int32) *core.Player {
-	s.connMutex.RLock()
-	defer s.connMutex.RUnlock()
-
-	for _, player := range s.game.Players {
-		if player.ID == int(playerID) {
-			return player
-		}
+	if remainingPlayers == 0 && s.getState() == StateRunning && s.ctx.Err() == nil {
+		s.handleGameOver(-1)
 	}
-	return nil
 }
 
 // ========== 消息处理 ==========
@@ -372,7 +366,9 @@ func (s *GameServer) handleJoinRequest(conn *Connection, req *gamev1.JoinRequest
 	}
 
 	// 构造游戏开始消息
+	s.gameMu.RLock()
 	initialMap := protocol.CoreMapToProto(s.game.Map)
+	s.gameMu.RUnlock()
 	packet := protocol.NewGameStart(playerID, initialMap)
 	data, err := protocol.Marshal(packet)
 	if err != nil {
@@ -397,8 +393,10 @@ func (s *GameServer) handleClientInput(playerID int32, input *gamev1.ClientInput
 		return
 	}
 
-	player := s.getPlayer(playerID)
+	s.gameMu.Lock()
+	player := s.getPlayerLocked(playerID)
 	if player == nil || player.Dead {
+		s.gameMu.Unlock()
 		return
 	}
 
@@ -427,6 +425,7 @@ func (s *GameServer) handleClientInput(playerID int32, input *gamev1.ClientInput
 			log.Printf("玩家 %d 放置炸弹", playerID)
 		}
 	}
+	s.gameMu.Unlock()
 }
 
 // ========== 辅助函数 ==========
@@ -444,6 +443,37 @@ func getSpawnPosition(playerID int) (int, int) {
 	// 取模，支持任意数量的玩家
 	index := (playerID - 1) % len(spawns)
 	return spawns[index].x, spawns[index].y
+}
+
+func (s *GameServer) getPlayerLocked(playerID int32) *core.Player {
+	for _, player := range s.game.Players {
+		if player.ID == int(playerID) {
+			return player
+		}
+	}
+	return nil
+}
+
+func (s *GameServer) checkGameOverLocked() (bool, int32) {
+	total, alive, winnerID := s.countPlayersAliveLocked()
+	if total == 0 {
+		return false, -1
+	}
+
+	// 单人训练：只有死亡才结束
+	if total == 1 {
+		if alive == 0 {
+			return true, -1
+		}
+		return false, -1
+	}
+
+	// 多人对战：只剩 0/1 人时结束
+	if alive <= 1 {
+		return true, winnerID
+	}
+
+	return false, -1
 }
 
 // ========== 房间状态与重置 ==========
@@ -485,6 +515,16 @@ func (s *GameServer) resetRoomAfterDelay(delay time.Duration) {
 	s.resetGame()
 }
 
+func (s *GameServer) snapshotConnections() []*Connection {
+	s.connMutex.RLock()
+	conns := make([]*Connection, 0, len(s.connections))
+	for _, conn := range s.connections {
+		conns = append(conns, conn)
+	}
+	s.connMutex.RUnlock()
+	return conns
+}
+
 func (s *GameServer) closeAllConnections() {
 	s.connMutex.RLock()
 	conns := make([]*Connection, 0, len(s.connections))
@@ -503,8 +543,10 @@ func (s *GameServer) closeAllConnections() {
 }
 
 func (s *GameServer) resetGame() {
+	s.gameMu.Lock()
 	s.game = core.NewGame()
 	s.frameId = 0
+	s.gameMu.Unlock()
 
 	s.connMutex.Lock()
 	s.nextPlayerID = 1
@@ -515,6 +557,12 @@ func (s *GameServer) resetGame() {
 }
 
 func (s *GameServer) countPlayersAlive() (total int, alive int, winnerID int32) {
+	s.gameMu.RLock()
+	defer s.gameMu.RUnlock()
+	return s.countPlayersAliveLocked()
+}
+
+func (s *GameServer) countPlayersAliveLocked() (total int, alive int, winnerID int32) {
 	winnerID = -1
 	for _, player := range s.game.Players {
 		total++
@@ -539,10 +587,15 @@ func (s *GameServer) broadcastGameOver(winnerID int32) {
 	}
 
 	s.connMutex.RLock()
+	conns := make([]*Connection, 0, len(s.connections))
 	for _, conn := range s.connections {
-		if err := conn.Send(data); err != nil {
-			log.Printf("发送游戏结束到玩家 %d 失败: %v", conn.playerID, err)
-		}
+		conns = append(conns, conn)
 	}
 	s.connMutex.RUnlock()
+
+	for _, conn := range conns {
+		if err := conn.Send(data); err != nil {
+			log.Printf("发送游戏结束到玩家 %d 失败: %v", conn.getPlayerID(), err)
+		}
+	}
 }
