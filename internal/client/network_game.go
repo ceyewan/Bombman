@@ -30,10 +30,10 @@ func NewNetworkGameClient(network *NetworkClient, controlScheme ControlScheme) (
 		playersMap: make(map[int]*Player),
 	}
 
-	// 等待游戏开始消息，同步地图
-	gameStart := network.ReceiveGameStart()
-	if gameStart != nil {
-		client.syncMap(gameStart.InitialMap)
+	// 使用服务器下发的初始地图
+	initialMap := network.GetInitialMap()
+	if initialMap != nil {
+		client.syncMap(initialMap)
 	}
 
 	return client, nil
