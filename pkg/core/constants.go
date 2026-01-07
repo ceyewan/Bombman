@@ -21,7 +21,8 @@ const (
 	PlayerWidth               = TileSize - 6 // 碰撞盒宽度（留3像素边距）
 	PlayerHeight              = TileSize - 6 // 碰撞盒高度
 	PlayerMargin              = 1            // 碰撞检测内边距
-	CornerCorrectionTolerance = 6            // 拐角修正容错（像素）
+	CornerCorrectionTolerance = 4            // 拐角修正容错（像素）
+	SoftAlignFactor           = 0.6          // 软对齐比例（相对本帧移动距离）
 )
 
 // 炸弹配置（秒）

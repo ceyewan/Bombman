@@ -145,6 +145,8 @@ func (p *Player) Move(dx, dy float64, game *Game) bool {
 	p.Y = newY
 	p.IsMoving = (dx != 0 || dy != 0)
 
+	p.applySoftAlign(dx, dy, game, bombPositions)
+
 	// 更新方向
 	if dx > 0 {
 		p.Direction = DirRight
@@ -286,6 +288,52 @@ func (p *Player) tryCornerCorrection(dx, dy float64, game *Game, bombPositions [
 		return newX, newY, true
 	}
 	return 0, 0, false
+}
+
+func (p *Player) applySoftAlign(dx, dy float64, game *Game, bombPositions []struct{ X, Y int }) {
+	if dx == 0 && dy == 0 {
+		return
+	}
+	if dx != 0 && dy != 0 {
+		return
+	}
+
+	if dx != 0 {
+		targetY := p.nearestAlignedY()
+		offset := targetY - p.Y
+		if math.Abs(offset) > CornerCorrectionTolerance {
+			return
+		}
+		step := math.Min(math.Abs(offset), math.Abs(dx)*SoftAlignFactor)
+		if step == 0 {
+			return
+		}
+		if offset < 0 {
+			step = -step
+		}
+		newY := p.Y + step
+		if game.Map.CanMoveTo(int(p.X), int(newY), p.Width, p.Height, bombPositions) {
+			p.Y = newY
+		}
+		return
+	}
+
+	targetX := p.nearestAlignedX()
+	offset := targetX - p.X
+	if math.Abs(offset) > CornerCorrectionTolerance {
+		return
+	}
+	step := math.Min(math.Abs(offset), math.Abs(dy)*SoftAlignFactor)
+	if step == 0 {
+		return
+	}
+	if offset < 0 {
+		step = -step
+	}
+	newX := p.X + step
+	if game.Map.CanMoveTo(int(newX), int(p.Y), p.Width, p.Height, bombPositions) {
+		p.X = newX
+	}
 }
 
 func (p *Player) nearestAlignedX() float64 {
