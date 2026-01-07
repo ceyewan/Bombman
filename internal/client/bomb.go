@@ -22,6 +22,10 @@ func NewBombRenderer(bomb *core.Bomb) *BombRenderer {
 // Draw 绘制炸弹
 func (b *BombRenderer) Draw(screen *ebiten.Image) {
 	bomb := b.Bomb
+	centerOffset := float32(core.TileSize) / 2
+	cx := float32(bomb.X) + centerOffset
+	cy := float32(bomb.Y) + centerOffset
+
 	// 计算闪烁效果
 	elapsedSeconds := core.DefaultTimeToBombSeconds - bomb.TimeToExplode
 	if elapsedSeconds < 0 {
@@ -44,17 +48,17 @@ func (b *BombRenderer) Draw(screen *ebiten.Image) {
 
 	// 炸弹主体（黑色）
 	bombColor := color.RGBA{0, 0, 0, alpha}
-	vector.FillCircle(screen, float32(bomb.X), float32(bomb.Y), radius, bombColor, false)
+	vector.FillCircle(screen, cx, cy, radius, bombColor, false)
 
 	// 炸弹轮廓
-	vector.StrokeCircle(screen, float32(bomb.X), float32(bomb.Y), radius, 2,
+	vector.StrokeCircle(screen, cx, cy, radius, 2,
 		color.RGBA{50, 50, 50, 255}, false)
 
 	// 引线（根据时间变短）
 	fuseLength := float32(15 * (1 - ratio))
 	if fuseLength > 0 {
-		fuseX := float32(bomb.X) - radius*0.5
-		fuseY := float32(bomb.Y) - radius
+		fuseX := cx - radius*0.5
+		fuseY := cy - radius
 
 		// 引线（棕色）
 		vector.StrokeLine(screen, fuseX, fuseY, fuseX-fuseLength*0.5, fuseY-fuseLength,
@@ -73,7 +77,7 @@ func (b *BombRenderer) Draw(screen *ebiten.Image) {
 	if ratio > 0.7 {
 		warningAlpha := uint8((ratio - 0.7) / 0.3 * 100)
 		warningRadius := radius + float32(10*(ratio-0.7)/0.3)
-		vector.StrokeCircle(screen, float32(bomb.X), float32(bomb.Y), warningRadius, 2,
+		vector.StrokeCircle(screen, cx, cy, warningRadius, 2,
 			color.RGBA{255, 0, 0, warningAlpha}, false)
 	}
 }

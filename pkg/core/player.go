@@ -168,8 +168,15 @@ func (p *Player) PlaceBomb(game *Game) *Bomb {
 	}
 
 	// 获取玩家所在格子
-	gridX := int(p.X) / TileSize
-	gridY := int(p.Y) / TileSize
+	centerX := int(p.X + float64(p.Width)/2)
+	centerY := int(p.Y + float64(p.Height)/2)
+	gridX := centerX / TileSize
+	gridY := centerY / TileSize
+
+	// 只能在空地放置炸弹
+	if game.Map.GetTile(gridX, gridY) != TileEmpty {
+		return nil
+	}
 
 	// 检查该格子是否已有炸弹
 	for _, bomb := range game.Bombs {
