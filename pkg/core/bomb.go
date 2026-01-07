@@ -1,15 +1,12 @@
 package core
 
-import "time"
-
 // Bomb 炸弹（纯逻辑结构，不包含渲染）
 type Bomb struct {
 	X                 int // 格子坐标X
 	Y                 int // 格子坐标Y
-	PlacedAt          time.Time
-	TimeToBomb        time.Duration
+	TimeToExplode     float64
 	ExplosionRange    int
-	ExplosionDuration time.Duration
+	ExplosionDuration float64
 }
 
 // NewBomb 创建新炸弹
@@ -17,16 +14,20 @@ func NewBomb(gridX, gridY int) *Bomb {
 	return &Bomb{
 		X:                 gridX * TileSize, // 转换为像素坐标
 		Y:                 gridY * TileSize,
-		PlacedAt:          time.Now(),
-		TimeToBomb:        time.Duration(DefaultTimeToBomb),
+		TimeToExplode:     DefaultTimeToBombSeconds,
 		ExplosionRange:    DefaultExplosionRange,
-		ExplosionDuration: time.Duration(DefaultExplosionDuration),
+		ExplosionDuration: DefaultExplosionDurationSeconds,
 	}
 }
 
 // IsExploded 检查炸弹是否已爆炸
 func (b *Bomb) IsExploded() bool {
-	return time.Since(b.PlacedAt) >= b.TimeToBomb
+	return b.TimeToExplode <= 0
+}
+
+// Update 更新炸弹计时
+func (b *Bomb) Update(deltaTime float64) {
+	b.TimeToExplode -= deltaTime
 }
 
 // GetGridPosition 获取炸弹的格子坐标
@@ -39,7 +40,8 @@ type Explosion struct {
 	CenterX  int
 	CenterY  int
 	Range    int
-	StartTime time.Time
+	Elapsed  float64
+	Duration float64
 	Cells    []ExplosionCell
 }
 
@@ -54,14 +56,20 @@ func NewExplosion(centerX, centerY, rangeVal int) *Explosion {
 		CenterX:  centerX,
 		CenterY:  centerY,
 		Range:    rangeVal,
-		StartTime: time.Now(),
+		Elapsed:  0,
+		Duration: DefaultExplosionDurationSeconds,
 		Cells:    []ExplosionCell{},
 	}
 }
 
 // IsExpired 检查爆炸是否已结束
 func (e *Explosion) IsExpired() bool {
-	return time.Since(e.StartTime) >= time.Duration(DefaultExplosionDuration)
+	return e.Elapsed >= e.Duration
+}
+
+// Update 更新爆炸计时
+func (e *Explosion) Update(deltaTime float64) {
+	e.Elapsed += deltaTime
 }
 
 // CalculateExplosionCells 计算爆炸影响的所有格子
@@ -72,10 +80,10 @@ func (e *Explosion) CalculateExplosionCells(gameMap *GameMap) []ExplosionCell {
 
 	// 四个方向扩散
 	directions := []struct{ dx, dy int }{
-		{0, -1},  // 上
-		{0, 1},   // 下
-		{-1, 0},  // 左
-		{1, 0},   // 右
+		{0, -1}, // 上
+		{0, 1},  // 下
+		{-1, 0}, // 左
+		{1, 0},  // 右
 	}
 
 	for _, dir := range directions {

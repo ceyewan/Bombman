@@ -2,6 +2,9 @@
 
 .PHONY: gen clean lint format help install-tools local server client clients
 
+PROTO ?= kcp
+ADDR ?= :8080
+
 # 默认目标
 help:
 	@echo "========================================"
@@ -10,7 +13,7 @@ help:
 	@echo ""
 	@echo "游戏运行:"
 	@echo "  make local       - 启动单机版游戏"
-	@echo "  make server      - 启动联机服务器"
+	@echo "  make server      - 启动联机服务器 (PROTO=tcp/kcp ADDR=:8080)"
 	@echo "  make client      - 启动联机客户端"
 	@echo "  make clients     - 启动两个联机客户端（WASD + 方向键）"
 	@echo ""
@@ -31,7 +34,7 @@ local:
 # 启动联机服务器
 server:
 	@echo "启动联机服务器..."
-	go run cmd/server/main.go
+	go run cmd/server/main.go -addr=$(ADDR) -proto=$(PROTO)
 
 # 启动联机客户端
 client:
@@ -99,7 +102,7 @@ help-dev:
 	@echo ""
 	@echo "游戏运行（自定义参数）:"
 	@echo "  单机版：go run cmd/client/main.go -character=1 -control=arrow"
-	@echo "  联机服务器：go run cmd/server/main.go -addr=:9000"
+	@echo "  联机服务器：go run cmd/server/main.go -addr=:9000 -proto=tcp"
 	@echo "  联机客户端：go run cmd/client/main.go -server=localhost:8080"
 	@echo ""
 	@echo "测试:"

@@ -13,10 +13,11 @@ import (
 func main() {
 	// 命令行参数
 	address := flag.String("addr", ":8080", "服务器监听地址")
+	proto := flag.String("proto", "tcp", "服务器监听协议: tcp 或 kcp")
 	flag.Parse()
 
 	// 创建服务器
-	gameServer := server.NewGameServer(*address)
+	gameServer := server.NewGameServer(*address, *proto)
 
 	// 启动服务器（在新的 goroutine 中）
 	go func() {
@@ -28,6 +29,7 @@ func main() {
 	log.Println("========================================")
 	log.Println("  Bomberman 联机服务器")
 	log.Println("========================================")
+	log.Printf("监听协议: %s", *proto)
 	log.Printf("监听地址: %s", *address)
 	log.Printf("最大玩家数: %d", server.MaxPlayers)
 	log.Printf("服务器 TPS: %d", server.ServerTPS)

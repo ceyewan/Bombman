@@ -3,11 +3,10 @@ package client
 import (
 	"image/color"
 	"math"
-	"time"
 
+	"bomberman/pkg/core"
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
-	"bomberman/pkg/core"
 )
 
 // BombRenderer 炸弹渲染器
@@ -24,14 +23,23 @@ func NewBombRenderer(bomb *core.Bomb) *BombRenderer {
 func (b *BombRenderer) Draw(screen *ebiten.Image) {
 	bomb := b.Bomb
 	// 计算闪烁效果
-	elapsed := time.Since(bomb.PlacedAt)
-	ratio := float64(elapsed) / float64(bomb.TimeToBomb)
+	elapsedSeconds := core.DefaultTimeToBombSeconds - bomb.TimeToExplode
+	if elapsedSeconds < 0 {
+		elapsedSeconds = 0
+	}
+	ratio := 0.0
+	if core.DefaultTimeToBombSeconds > 0 {
+		ratio = elapsedSeconds / core.DefaultTimeToBombSeconds
+	}
+	if ratio > 1 {
+		ratio = 1
+	}
 
 	// 炸弹半径
 	radius := float32(12)
 
 	// 根据时间闪烁
-	blink := math.Sin(elapsed.Seconds() * 8) // 快速闪烁
+	blink := math.Sin(elapsedSeconds * 8) // 快速闪烁
 	alpha := uint8(200 + 55*blink)
 
 	// 炸弹主体（黑色）
@@ -83,8 +91,13 @@ func NewExplosionRenderer(explosion *core.Explosion) *ExplosionRenderer {
 // Draw 绘制爆炸效果
 func (e *ExplosionRenderer) Draw(screen *ebiten.Image) {
 	explosion := e.Explosion
-	elapsed := time.Since(explosion.StartTime)
-	ratio := float64(elapsed) / float64(core.DefaultExplosionDuration)
+	ratio := 0.0
+	if explosion.Duration > 0 {
+		ratio = explosion.Elapsed / explosion.Duration
+	}
+	if ratio > 1 {
+		ratio = 1
+	}
 
 	// 爆炸逐渐消失
 	alpha := uint8(255 * (1 - ratio))

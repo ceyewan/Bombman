@@ -23,10 +23,10 @@ const (
 	PlayerMargin       = 1            // 碰撞检测内边距
 )
 
-// 炸弹配置
+// 炸弹配置（秒）
 const (
-	DefaultTimeToBomb       = 2 * 1000 * 1000 * 1000 // 2秒（纳秒）
-	DefaultExplosionRange   = 3                       // 爆炸范围（格子数）
-	DefaultExplosionDuration = 500 * 1000 * 1000     // 500毫秒（纳秒）
-	BombCooldown            = 200 * 1000 * 1000       // 200毫秒（纳秒）
+	DefaultTimeToBombSeconds        = 2.0 // 2秒
+	DefaultExplosionRange           = 3   // 爆炸范围（格子数）
+	DefaultExplosionDurationSeconds = 0.5 // 500毫秒
+	BombCooldownSeconds             = 0.2 // 200毫秒
 )

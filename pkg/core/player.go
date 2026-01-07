@@ -1,7 +1,5 @@
 package core
 
-import "time"
-
 // Direction 移动方向
 type Direction int
 
@@ -14,17 +12,17 @@ const (
 
 // Player 玩家（纯逻辑，不包含渲染）
 type Player struct {
-	ID         int
-	X, Y       float64 // 玩家当前位置
-	Width      int
-	Height     int
-	Speed      float64 // 像素/秒
-	Direction  Direction
-	IsMoving   bool
-	Character  CharacterType
-	Dead       bool
-	LastBombTime time.Time
-	BombCooldown   time.Duration
+	ID                    int
+	X, Y                  float64 // 玩家当前位置
+	Width                 int
+	Height                int
+	Speed                 float64 // 像素/秒
+	Direction             Direction
+	IsMoving              bool
+	Character             CharacterType
+	Dead                  bool
+	BombCooldownSeconds   float64
+	BombCooldownRemaining float64
 
 	// 服务器同步相关（网络版本使用）
 	NetworkX, NetworkY         float64 // 服务器同步过来的位置
@@ -37,24 +35,25 @@ type Player struct {
 // NewPlayer 创建新玩家
 func NewPlayer(id int, x, y int, charType CharacterType) *Player {
 	return &Player{
-		ID:           id,
-		X:            float64(x),
-		Y:            float64(y),
-		Width:        PlayerWidth,
-		Height:       PlayerHeight,
-		Speed:        PlayerDefaultSpeed,
-		Direction:    DirDown,
-		IsMoving:     false,
-		Character:    charType,
-		Dead:         false,
-		BombCooldown: time.Duration(BombCooldown),
-		NetworkX:     float64(x),
-		NetworkY:     float64(y),
-		LastNetworkX: float64(x),
-		LastNetworkY: float64(y),
-		LerpProgress: 1.0,
-		LerpSpeed:    PlayerDefaultSpeed,
-		IsSimulated:  false,
+		ID:                    id,
+		X:                     float64(x),
+		Y:                     float64(y),
+		Width:                 PlayerWidth,
+		Height:                PlayerHeight,
+		Speed:                 PlayerDefaultSpeed,
+		Direction:             DirDown,
+		IsMoving:              false,
+		Character:             charType,
+		Dead:                  false,
+		BombCooldownSeconds:   BombCooldownSeconds,
+		BombCooldownRemaining: 0,
+		NetworkX:              float64(x),
+		NetworkY:              float64(y),
+		LastNetworkX:          float64(x),
+		LastNetworkY:          float64(y),
+		LerpProgress:          1.0,
+		LerpSpeed:             PlayerDefaultSpeed,
+		IsSimulated:           false,
 	}
 }
 
@@ -62,6 +61,13 @@ func NewPlayer(id int, x, y int, charType CharacterType) *Player {
 func (p *Player) Update(deltaTime float64, game *Game) {
 	if p.Dead {
 		return
+	}
+
+	if p.BombCooldownRemaining > 0 {
+		p.BombCooldownRemaining -= deltaTime
+		if p.BombCooldownRemaining < 0 {
+			p.BombCooldownRemaining = 0
+		}
 	}
 
 	if p.IsSimulated {
@@ -142,8 +148,7 @@ func (p *Player) PlaceBomb(game *Game) *Bomb {
 	}
 
 	// 检查冷却时间
-	now := time.Now()
-	if now.Sub(p.LastBombTime) < p.BombCooldown {
+	if p.BombCooldownRemaining > 0 {
 		return nil
 	}
 
@@ -159,7 +164,7 @@ func (p *Player) PlaceBomb(game *Game) *Bomb {
 		}
 	}
 
-	p.LastBombTime = now
+	p.BombCooldownRemaining = p.BombCooldownSeconds
 	bomb := NewBomb(gridX, gridY)
 	return bomb
 }

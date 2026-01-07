@@ -68,6 +68,15 @@ func (c *Connection) Handle(ctx context.Context, wg *sync.WaitGroup) {
 
 // Close 关闭连接
 func (c *Connection) Close() {
+	c.closeWithNotify(true)
+}
+
+// CloseWithoutNotify 关闭连接但不触发移除玩家逻辑
+func (c *Connection) CloseWithoutNotify() {
+	c.closeWithNotify(false)
+}
+
+func (c *Connection) closeWithNotify(notify bool) {
 	c.closeMu.Lock()
 	defer c.closeMu.Unlock()
 
@@ -87,8 +96,10 @@ func (c *Connection) Close() {
 	close(c.sendChan)
 
 	// 从服务器移除玩家
-	if playerID := c.getPlayerID(); playerID >= 0 {
-		c.server.removePlayer(playerID)
+	if notify {
+		if playerID := c.getPlayerID(); playerID >= 0 {
+			c.server.removePlayer(playerID)
+		}
 	}
 
 	log.Printf("玩家 %d: 连接已关闭", c.getPlayerID())

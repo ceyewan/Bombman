@@ -1,8 +1,6 @@
 package protocol
 
 import (
-	"time"
-
 	gamev1 "bomberman/api/gen/bomberman/v1"
 	"bomberman/pkg/core"
 )
@@ -115,8 +113,7 @@ func CoreBombToProto(b *core.Bomb) *gamev1.BombState {
 	}
 
 	// 计算剩余时间（毫秒）
-	elapsed := time.Since(b.PlacedAt)
-	timeLeftMs := int32((b.TimeToBomb - elapsed).Milliseconds())
+	timeLeftMs := int32(b.TimeToExplode * 1000)
 	if timeLeftMs < 0 {
 		timeLeftMs = 0
 	}
@@ -136,12 +133,11 @@ func ProtoBombToCore(b *gamev1.BombState) *core.Bomb {
 	}
 
 	return &core.Bomb{
-		X:              int(b.X),
-		Y:              int(b.Y),
-		TimeToBomb:     time.Duration(b.TimeLeftMs) * time.Millisecond,
-		ExplosionRange: int(b.ExplosionRange),
-		// PlacedAt 需要根据当前时间推算
-		PlacedAt:       time.Now().Add(-time.Duration(b.TimeLeftMs) * time.Millisecond),
+		X:                 int(b.X),
+		Y:                 int(b.Y),
+		TimeToExplode:     float64(b.TimeLeftMs) / 1000,
+		ExplosionRange:    int(b.ExplosionRange),
+		ExplosionDuration: core.DefaultExplosionDurationSeconds,
 	}
 }
 
@@ -161,12 +157,11 @@ func CoreExplosionToProto(e *core.Explosion) *gamev1.ExplosionState {
 		}
 	}
 
-	elapsed := time.Since(e.StartTime)
 	return &gamev1.ExplosionState{
 		CenterX:   int32(e.CenterX),
 		CenterY:   int32(e.CenterY),
 		Range:     int32(e.Range),
-		ElapsedMs: elapsed.Milliseconds(),
+		ElapsedMs: int64(e.Elapsed * 1000),
 		Cells:     cells,
 	}
 }
@@ -186,11 +181,12 @@ func ProtoExplosionToCore(e *gamev1.ExplosionState) *core.Explosion {
 	}
 
 	return &core.Explosion{
-		CenterX:   int(e.CenterX),
-		CenterY:   int(e.CenterY),
-		Range:     int(e.Range),
-		StartTime: time.Now().Add(-time.Duration(e.ElapsedMs) * time.Millisecond),
-		Cells:     cells,
+		CenterX:  int(e.CenterX),
+		CenterY:  int(e.CenterY),
+		Range:    int(e.Range),
+		Elapsed:  float64(e.ElapsedMs) / 1000,
+		Duration: core.DefaultExplosionDurationSeconds,
+		Cells:    cells,
 	}
 }
 

@@ -38,6 +38,7 @@ func (g *Game) Update(deltaTime float64) {
 	// 更新炸弹
 	for i := len(g.Bombs) - 1; i >= 0; i-- {
 		bomb := g.Bombs[i]
+		bomb.Update(deltaTime)
 		if bomb.IsExploded() {
 			// 炸弹爆炸
 			g.createExplosion(bomb)
@@ -49,6 +50,7 @@ func (g *Game) Update(deltaTime float64) {
 	// 更新爆炸效果
 	for i := len(g.Explosions) - 1; i >= 0; i-- {
 		explosion := g.Explosions[i]
+		explosion.Update(deltaTime)
 		if explosion.IsExpired() {
 			// 移除爆炸效果
 			g.Explosions = append(g.Explosions[:i], g.Explosions[i+1:]...)
@@ -61,6 +63,7 @@ func (g *Game) createExplosion(bomb *Bomb) {
 	gridX, gridY := bomb.GetGridPosition()
 
 	explosion := NewExplosion(gridX, gridY, bomb.ExplosionRange)
+	explosion.Duration = bomb.ExplosionDuration
 	explosion.Cells = explosion.CalculateExplosionCells(g.Map)
 
 	// 炸毁砖块
