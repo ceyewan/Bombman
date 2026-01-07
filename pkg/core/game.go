@@ -2,19 +2,21 @@ package core
 
 // Game 游戏状态（纯逻辑，不包含渲染）
 type Game struct {
-	Map        *GameMap
-	Players    []*Player
-	Bombs      []*Bomb
-	Explosions []*Explosion
+	Map             *GameMap
+	Players         []*Player
+	Bombs           []*Bomb
+	Explosions      []*Explosion
+	IsAuthoritative bool // 是否由于权威逻辑（控制爆炸、伤害判定等）
 }
 
 // NewGame 创建新游戏
 func NewGame() *Game {
 	return &Game{
-		Map:        NewGameMap(),
-		Players:    make([]*Player, 0),
-		Bombs:      make([]*Bomb, 0),
-		Explosions: make([]*Explosion, 0),
+		Map:             NewGameMap(),
+		Players:         make([]*Player, 0),
+		Bombs:           make([]*Bomb, 0),
+		Explosions:      make([]*Explosion, 0),
+		IsAuthoritative: true, // 默认开启权威逻辑（单机模式）
 	}
 }
 
@@ -39,7 +41,9 @@ func (g *Game) Update(deltaTime float64) {
 	for i := len(g.Bombs) - 1; i >= 0; i-- {
 		bomb := g.Bombs[i]
 		bomb.Update(deltaTime)
-		if bomb.IsExploded() {
+		// 只有权威模式（单机或服务器）才处理爆炸逻辑
+		// 客户端联机模式只负责渲染，不处理逻辑
+		if g.IsAuthoritative && bomb.IsExploded() {
 			// 炸弹爆炸
 			g.createExplosion(bomb)
 			// 移除炸弹

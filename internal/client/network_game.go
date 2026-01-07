@@ -4,6 +4,7 @@ import (
 	"log"
 
 	gamev1 "bomberman/api/gen/bomberman/v1"
+	"bomberman/pkg/core"
 	"bomberman/pkg/protocol"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -22,6 +23,10 @@ func NewNetworkGameClient(network *NetworkClient, controlScheme ControlScheme) (
 	// 创建游戏对象
 	game := NewGame()
 	game.controlScheme = controlScheme
+
+	// 在网络模式下，客户端只负责渲染和预测移动，不处理游戏规则逻辑（如爆炸破坏地图）
+	// 所有游戏状态变化都由服务器权威决定
+	game.coreGame.IsAuthoritative = false
 
 	client := &NetworkGameClient{
 		game:       game,
@@ -162,6 +167,15 @@ func (ngc *NetworkGameClient) syncExplosions(protoExplosions []*gamev1.Explosion
 		explosion := protocol.ProtoExplosionToCore(protoExplosion)
 		if explosion != nil {
 			ngc.game.coreGame.Explosions = append(ngc.game.coreGame.Explosions, explosion)
+
+			// 增量同步地图：根据爆炸范围清理砖块
+			// 因为客户端不再进行权威计算（IsAuthoritative=false），且服务器可能仅在初始时刻发送全量地图，
+			// 所以我们需要依赖服务器发来的爆炸范围来即时更新本地地图状态。
+			for _, cell := range explosion.Cells {
+				if ngc.game.coreGame.Map.GetTile(cell.GridX, cell.GridY) == core.TileBrick {
+					ngc.game.coreGame.Map.SetTile(cell.GridX, cell.GridY, core.TileEmpty)
+				}
+			}
 		}
 	}
 }
