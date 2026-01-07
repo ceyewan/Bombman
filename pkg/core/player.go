@@ -1,5 +1,7 @@
 package core
 
+import "math"
+
 // Direction 移动方向
 type Direction int
 
@@ -131,7 +133,12 @@ func (p *Player) Move(dx, dy float64, game *Game) bool {
 	// 检查碰撞
 	bombPositions := getBombGridPositions(game.Bombs, p.BombIgnoreActive, p.BombIgnoreGridX, p.BombIgnoreGridY)
 	if !game.Map.CanMoveTo(int(newX), int(newY), p.Width, p.Height, bombPositions) {
-		return false
+		correctedX, correctedY, ok := p.tryCornerCorrection(dx, dy, game, bombPositions)
+		if !ok {
+			return false
+		}
+		newX = correctedX
+		newY = correctedY
 	}
 
 	p.X = newX
@@ -230,4 +237,77 @@ func (p *Player) overlapsGrid(gridX, gridY int) bool {
 	tileSize := float64(TileSize)
 
 	return px < tileX+tileSize && px+pw > tileX && py < tileY+tileSize && py+ph > tileY
+}
+
+func (p *Player) tryCornerCorrection(dx, dy float64, game *Game, bombPositions []struct{ X, Y int }) (float64, float64, bool) {
+	if dx == 0 && dy == 0 {
+		return 0, 0, false
+	}
+	if dx != 0 && dy != 0 {
+		return 0, 0, false
+	}
+
+	if dx != 0 {
+		targetY := p.nearestAlignedY()
+		offset := targetY - p.Y
+		if math.Abs(offset) > CornerCorrectionTolerance {
+			return 0, 0, false
+		}
+		step := math.Min(math.Abs(offset), math.Abs(dx))
+		if step == 0 {
+			return 0, 0, false
+		}
+		if offset < 0 {
+			step = -step
+		}
+		newY := p.Y + step
+		newX := p.X + dx
+		if game.Map.CanMoveTo(int(newX), int(newY), p.Width, p.Height, bombPositions) {
+			return newX, newY, true
+		}
+		return 0, 0, false
+	}
+
+	targetX := p.nearestAlignedX()
+	offset := targetX - p.X
+	if math.Abs(offset) > CornerCorrectionTolerance {
+		return 0, 0, false
+	}
+	step := math.Min(math.Abs(offset), math.Abs(dy))
+	if step == 0 {
+		return 0, 0, false
+	}
+	if offset < 0 {
+		step = -step
+	}
+	newX := p.X + step
+	newY := p.Y + dy
+	if game.Map.CanMoveTo(int(newX), int(newY), p.Width, p.Height, bombPositions) {
+		return newX, newY, true
+	}
+	return 0, 0, false
+}
+
+func (p *Player) nearestAlignedX() float64 {
+	centerX := p.X + float64(p.Width)/2
+	gridX := int(math.Floor(centerX/float64(TileSize) + 0.5))
+	if gridX < 0 {
+		gridX = 0
+	} else if gridX >= MapWidth {
+		gridX = MapWidth - 1
+	}
+	offset := float64(TileSize-p.Width) / 2
+	return float64(gridX*TileSize) + offset
+}
+
+func (p *Player) nearestAlignedY() float64 {
+	centerY := p.Y + float64(p.Height)/2
+	gridY := int(math.Floor(centerY/float64(TileSize) + 0.5))
+	if gridY < 0 {
+		gridY = 0
+	} else if gridY >= MapHeight {
+		gridY = MapHeight - 1
+	}
+	offset := float64(TileSize-p.Height) / 2
+	return float64(gridY*TileSize) + offset
 }

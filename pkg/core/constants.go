@@ -11,16 +11,17 @@ const (
 
 // 游戏帧率
 const (
-	FPS             = 60
-	FixedDeltaTime  = 1.0 / FPS
+	FPS            = 60
+	FixedDeltaTime = 1.0 / FPS
 )
 
 // 玩家配置
 const (
-	PlayerDefaultSpeed = 120.0 // 像素/秒
-	PlayerWidth        = TileSize - 6 // 碰撞盒宽度（留3像素边距）
-	PlayerHeight       = TileSize - 6 // 碰撞盒高度
-	PlayerMargin       = 1            // 碰撞检测内边距
+	PlayerDefaultSpeed        = 120.0        // 像素/秒
+	PlayerWidth               = TileSize - 6 // 碰撞盒宽度（留3像素边距）
+	PlayerHeight              = TileSize - 6 // 碰撞盒高度
+	PlayerMargin              = 1            // 碰撞检测内边距
+	CornerCorrectionTolerance = 6            // 拐角修正容错（像素）
 )
 
 // 炸弹配置（秒）
