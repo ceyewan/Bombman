@@ -4,6 +4,7 @@
 
 PROTO ?= kcp
 ADDR ?= :8080
+SERVER ?= localhost:8080
 
 # 默认目标
 help:
@@ -14,7 +15,7 @@ help:
 	@echo "游戏运行:"
 	@echo "  make local       - 启动单机版游戏"
 	@echo "  make server      - 启动联机服务器 (PROTO=tcp/kcp ADDR=:8080)"
-	@echo "  make client      - 启动联机客户端"
+	@echo "  make client      - 启动联机客户端 (PROTO=tcp/kcp SERVER=localhost:8080)"
 	@echo "  make clients     - 启动两个联机客户端（WASD + 方向键）"
 	@echo ""
 	@echo "开发工具:"
@@ -39,13 +40,13 @@ server:
 # 启动联机客户端
 client:
 	@echo "启动联机客户端..."
-	go run cmd/client/main.go -server=localhost:8080
+	go run cmd/client/main.go -server=$(SERVER) -proto=$(PROTO)
 
 # 启动两个联机客户端
 clients:
 	@echo "启动两个联机客户端..."
-	@go run cmd/client/main.go -server=localhost:8080 -character=0 -control=wasd & \
-	go run cmd/client/main.go -server=localhost:8080 -character=1 -control=arrow & \
+	@go run cmd/client/main.go -server=$(SERVER) -proto=$(PROTO) -character=0 -control=wasd & \
+	go run cmd/client/main.go -server=$(SERVER) -proto=$(PROTO) -character=1 -control=arrow & \
 	wait
 
 # ========== 开发工具 ==========
@@ -103,7 +104,7 @@ help-dev:
 	@echo "游戏运行（自定义参数）:"
 	@echo "  单机版：go run cmd/client/main.go -character=1 -control=arrow"
 	@echo "  联机服务器：go run cmd/server/main.go -addr=:9000 -proto=tcp"
-	@echo "  联机客户端：go run cmd/client/main.go -server=localhost:8080"
+	@echo "  联机客户端：go run cmd/client/main.go -server=localhost:8080 -proto=tcp"
 	@echo ""
 	@echo "测试:"
 	@echo "  go test ./pkg/core/..."

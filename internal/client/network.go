@@ -14,6 +14,7 @@ import (
 	gamev1 "bomberman/api/gen/bomberman/v1"
 	"bomberman/pkg/core"
 	"bomberman/pkg/protocol"
+	kcp "github.com/xtaci/kcp-go/v5"
 )
 
 const (
@@ -22,24 +23,25 @@ const (
 
 // NetworkClient 网络客户端
 type NetworkClient struct {
-	conn     net.Conn
+	conn       net.Conn
 	serverAddr string
+	proto      string
 
 	// 玩家信息
-	playerID    int32
-	character   core.CharacterType
+	playerID  int32
+	character core.CharacterType
 
 	// 网络
-	connected   bool
-	ctx         context.Context
-	cancel      context.CancelFunc
-	wg          sync.WaitGroup
+	connected bool
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
 
 	// 消息队列
-	stateChan      chan *gamev1.ServerState
-	gameStartChan  chan *gamev1.GameStart
-	gameOverChan   chan *gamev1.GameOver
-	playerJoinChan chan *gamev1.PlayerJoin
+	stateChan       chan *gamev1.ServerState
+	gameStartChan   chan *gamev1.GameStart
+	gameOverChan    chan *gamev1.GameOver
+	playerJoinChan  chan *gamev1.PlayerJoin
 	playerLeaveChan chan int32
 
 	// 发送队列
@@ -51,11 +53,12 @@ type NetworkClient struct {
 }
 
 // NewNetworkClient 创建网络客户端
-func NewNetworkClient(serverAddr string, character core.CharacterType) *NetworkClient {
+func NewNetworkClient(serverAddr, proto string, character core.CharacterType) *NetworkClient {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &NetworkClient{
 		serverAddr:      serverAddr,
+		proto:           proto,
 		character:       character,
 		ctx:             ctx,
 		cancel:          cancel,
@@ -71,10 +74,10 @@ func NewNetworkClient(serverAddr string, character core.CharacterType) *NetworkC
 
 // Connect 连接到服务器
 func (nc *NetworkClient) Connect() error {
-	log.Printf("连接到服务器: %s", nc.serverAddr)
+	log.Printf("连接到服务器: %s (%s)", nc.serverAddr, nc.proto)
 
-	// 建立 TCP 连接
-	conn, err := net.DialTimeout("tcp", nc.serverAddr, 5*time.Second)
+	// 建立连接
+	conn, err := nc.dial()
 	if err != nil {
 		return fmt.Errorf("连接服务器失败: %w", err)
 	}
@@ -112,6 +115,22 @@ func (nc *NetworkClient) Connect() error {
 	case <-time.After(10 * time.Second):
 		nc.Close()
 		return errors.New("等待游戏开始超时")
+	}
+}
+
+func (nc *NetworkClient) dial() (net.Conn, error) {
+	switch nc.proto {
+	case "", "tcp":
+		return net.DialTimeout("tcp", nc.serverAddr, 5*time.Second)
+	case "kcp":
+		conn, err := kcp.DialWithOptions(nc.serverAddr, nil, 0, 0)
+		if err != nil {
+			return nil, err
+		}
+		conn.SetStreamMode(true)
+		return conn, nil
+	default:
+		return nil, fmt.Errorf("不支持的协议: %s", nc.proto)
 	}
 }
 

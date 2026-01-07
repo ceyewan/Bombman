@@ -16,6 +16,7 @@ import (
 func main() {
 	// 命令行参数
 	serverAddr := flag.String("server", "", "服务器地址（留空为单机模式）")
+	proto := flag.String("proto", "tcp", "服务器协议: tcp 或 kcp")
 	character := flag.Int("character", 0, "角色类型 (0=白, 1=黑, 2=红, 3=蓝)")
 	control := flag.String("control", "wasd", "控制方案 (wasd 或 arrow)")
 	flag.Parse()
@@ -63,13 +64,14 @@ func main() {
 		log.Println("========================================")
 		log.Println("  Bomberman - 联机模式")
 		log.Println("========================================")
+		log.Printf("协议: %s", *proto)
 		log.Printf("服务器: %s", *serverAddr)
 		log.Printf("角色: %s", charType)
 		log.Printf("控制: %s", controlScheme)
 		log.Println("========================================")
 
 		// 创建联机游戏
-		networkClient = client.NewNetworkClient(*serverAddr, charType)
+		networkClient = client.NewNetworkClient(*serverAddr, *proto, charType)
 
 		if err := networkClient.Connect(); err != nil {
 			log.Fatalf("连接服务器失败: %v", err)
@@ -83,7 +85,7 @@ func main() {
 			log.Fatalf("创建联机游戏失败: %v", err)
 		}
 
-		title = "Bomberman - 联机模式 [" + *serverAddr + "] [" + charType.String() + "] [" + controlScheme.String() + "]"
+		title = "Bomberman - 联机模式 [" + *proto + "] [" + *serverAddr + "] [" + charType.String() + "] [" + controlScheme.String() + "]"
 	}
 
 	ebiten.SetWindowTitle(title)
