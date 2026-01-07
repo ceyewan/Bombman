@@ -3,7 +3,7 @@
 .PHONY: gen clean lint format help install-tools build local server client clients
 
 PROTO ?= kcp
-ADDR ?= :8080
+ADDR ?= localhost:8080
 
 # 默认目标
 help:
