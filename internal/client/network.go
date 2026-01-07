@@ -48,6 +48,9 @@ type NetworkClient struct {
 	inputSeq int32
 	sendChan chan []byte
 
+	// 初始地图
+	initialMap *gamev1.MapState
+
 	// 错误
 	errChan chan error
 }
@@ -105,6 +108,7 @@ func (nc *NetworkClient) Connect() error {
 	select {
 	case gameStart := <-nc.gameStartChan:
 		nc.playerID = gameStart.YourPlayerId
+		nc.initialMap = gameStart.InitialMap
 		log.Printf("玩家 ID: %d", nc.playerID)
 		return nil
 
@@ -116,6 +120,11 @@ func (nc *NetworkClient) Connect() error {
 		nc.Close()
 		return errors.New("等待游戏开始超时")
 	}
+}
+
+// GetInitialMap 获取初始地图（由服务器下发）
+func (nc *NetworkClient) GetInitialMap() *gamev1.MapState {
+	return nc.initialMap
 }
 
 func (nc *NetworkClient) dial() (net.Conn, error) {
