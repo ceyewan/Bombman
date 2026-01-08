@@ -55,6 +55,14 @@ message ExplosionState {
   int32 range = 3; // 爆炸范围
   int64 elapsed_ms = 4; // 已逝去的时间（毫秒）
   repeated ExplosionCell cells = 5; // 爆炸影响的格子列表
+  repeated TileChange tile_changes = 6; // 地图变化（砖块被炸、门被揭示）
+}
+
+// 地图变化（单个格子的变化）
+message TileChange {
+  int32 x = 1; // 格子X坐标
+  int32 y = 2; // 格子Y坐标
+  int32 new_type = 3; // 新的 TileType（0=空地, 1=墙, 2=砖块, 3=门）
 }
 
 // 爆炸格子（对应 core.ExplosionCell）

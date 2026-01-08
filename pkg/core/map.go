@@ -122,7 +122,8 @@ func (m *GameMap) SetTile(x, y int, tile TileType) {
 
 // CanMoveTo 检查是否可以移动到指定像素位置
 // bombs: 当前地图上的炸弹列表（使用格子坐标）
-func (m *GameMap) CanMoveTo(x, y, width, height int, bombGridPositions []struct{ X, Y int }) bool {
+// explosionCells: 当前爆炸影响的格子列表（使用格子坐标）
+func (m *GameMap) CanMoveTo(x, y, width, height int, bombGridPositions []struct{ X, Y int }, explosionCells []GridPos) bool {
 	// 内缩1像素检测，防止边界穿模
 	margin := PlayerMargin
 	x += margin
@@ -172,9 +173,21 @@ func (m *GameMap) CanMoveTo(x, y, width, height int, bombGridPositions []struct{
 				return false
 			}
 		}
+
+		// 检查爆炸碰撞（不能穿过爆炸区域）
+		for _, expCell := range explosionCells {
+			if gridX == expCell.X && gridY == expCell.Y {
+				return false
+			}
+		}
 	}
 
 	return true
+}
+
+// CanMoveToWithoutExplosions 不检查爆炸的版本（向后兼容）
+func (m *GameMap) CanMoveToWithoutExplosions(x, y, width, height int, bombGridPositions []struct{ X, Y int }) bool {
+	return m.CanMoveTo(x, y, width, height, bombGridPositions, nil)
 }
 
 // GridToPlayerXY 格子位置转换为玩家所在的位置

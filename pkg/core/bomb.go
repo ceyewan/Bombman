@@ -124,6 +124,16 @@ type Explosion struct {
 	CreatedAtFrame  int32     // 创建时的帧号
 	Cells           []GridPos // 影响的格子
 	OwnerID         int       // 来源炸弹的所有者
+
+	// 地图变化（用于客户端同步）
+	TileChanges []TileChange // 爆炸导致的地图变化
+}
+
+// TileChange 地图变化记录
+type TileChange struct {
+	X, Y   int         // 格子坐标
+	OldType TileType    // 变化前的类型
+	NewType TileType    // 变化后的类型
 }
 
 // ExplosionCell 爆炸影响的格子（向后兼容）

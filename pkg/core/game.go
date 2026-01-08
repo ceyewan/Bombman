@@ -64,7 +64,13 @@ func (g *Game) Update() {
 }
 
 // updateBombs 更新所有炸弹
+// 注意：在非权威模式（网络客户端）下，炸弹由服务器同步控制，不应本地更新
 func (g *Game) updateBombs() {
+	// 非权威模式：炸弹生命周期由服务器完全控制
+	if !g.IsAuthoritative {
+		return
+	}
+
 	// 收集需要爆炸的炸弹
 	explodingBombs := make([]*Bomb, 0)
 
@@ -80,15 +86,13 @@ func (g *Game) updateBombs() {
 	}
 
 	// 移除已爆炸的炸弹
-	if g.IsAuthoritative {
-		newBombs := make([]*Bomb, 0, len(g.Bombs))
-		for _, bomb := range g.Bombs {
-			if !bomb.Exploded {
-				newBombs = append(newBombs, bomb)
-			}
+	newBombs := make([]*Bomb, 0, len(g.Bombs))
+	for _, bomb := range g.Bombs {
+		if !bomb.Exploded {
+			newBombs = append(newBombs, bomb)
 		}
-		g.Bombs = newBombs
 	}
+	g.Bombs = newBombs
 }
 
 // explodeBomb 处理单个炸弹爆炸
@@ -106,17 +110,33 @@ func (g *Game) explodeBomb(bomb *Bomb) {
 	// 将 GridPos 转换为内部 Cells 格式
 	explosion.Cells = make([]GridPos, len(cells))
 	copy(explosion.Cells, cells)
+	// 预分配地图变化数组
+	explosion.TileChanges = make([]TileChange, 0, len(cells))
 	g.Explosions = append(g.Explosions, explosion)
 
-	// 炸毁砖块
+	// 炸毁砖块，记录变化
 	for _, cell := range cells {
 		if g.Map.GetTile(cell.X, cell.Y) == TileBrick {
+			oldTile := TileBrick
+			var newTile TileType
+
 			// 检查是否是隐藏门
 			if cell.X == g.Map.HiddenDoorPos.X && cell.Y == g.Map.HiddenDoorPos.Y {
-				g.Map.SetTile(cell.X, cell.Y, TileDoor)
+				newTile = TileDoor
 			} else {
-				g.Map.SetTile(cell.X, cell.Y, TileEmpty)
+				newTile = TileEmpty
 			}
+
+			// 记录变化（用于客户端同步）
+			explosion.TileChanges = append(explosion.TileChanges, TileChange{
+				X:       cell.X,
+				Y:       cell.Y,
+				OldType: oldTile,
+				NewType: newTile,
+			})
+
+			// 应用变化
+			g.Map.SetTile(cell.X, cell.Y, newTile)
 		}
 	}
 
@@ -138,7 +158,13 @@ func (g *Game) explodeBomb(bomb *Bomb) {
 }
 
 // updateExplosions 更新所有爆炸
+// 注意：在非权威模式（网络客户端）下，爆炸由服务器同步控制，不应本地更新
 func (g *Game) updateExplosions() {
+	// 非权威模式：爆炸生命周期由服务器完全控制，不本地递减
+	if !g.IsAuthoritative {
+		return
+	}
+
 	newExplosions := make([]*Explosion, 0, len(g.Explosions))
 	for _, exp := range g.Explosions {
 		if !exp.Update() {

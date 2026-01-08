@@ -264,10 +264,13 @@ func (p *Player) Move(dx, dy float64, game *Game) bool {
 	newX := p.X + dx
 	newY := p.Y + dy
 
+	// 收集爆炸格子（用于碰撞检测）
+	explosionCells := collectExplosionCells(game.Explosions)
+
 	// 检查碰撞
 	bombPositions := getBombGridPositions(game.Bombs, p.BombIgnoreActive, p.BombIgnoreGridX, p.BombIgnoreGridY)
-	if !game.Map.CanMoveTo(int(newX), int(newY), p.Width, p.Height, bombPositions) {
-		correctedX, correctedY, ok := p.tryCornerCorrection(dx, dy, game, bombPositions)
+	if !game.Map.CanMoveTo(int(newX), int(newY), p.Width, p.Height, bombPositions, explosionCells) {
+		correctedX, correctedY, ok := p.tryCornerCorrection(dx, dy, game, bombPositions, explosionCells)
 		if !ok {
 			return false
 		}
@@ -279,7 +282,7 @@ func (p *Player) Move(dx, dy float64, game *Game) bool {
 	p.Y = newY
 	p.IsMoving = (dx != 0 || dy != 0)
 
-	p.applySoftAlign(dx, dy, game, bombPositions)
+	p.applySoftAlign(dx, dy, game, bombPositions, explosionCells)
 
 	// 更新方向
 	if dx > 0 {
@@ -297,6 +300,15 @@ func (p *Player) Move(dx, dy float64, game *Game) bool {
 	}
 
 	return true
+}
+
+// collectExplosionCells 收集所有爆炸影响的格子
+func collectExplosionCells(explosions []*Explosion) []GridPos {
+	cells := make([]GridPos, 0)
+	for _, exp := range explosions {
+		cells = append(cells, exp.Cells...)
+	}
+	return cells
 }
 
 // PlaceBomb 放置炸弹（返回是否成功）
@@ -381,7 +393,7 @@ func (p *Player) overlapsGrid(gridX, gridY int) bool {
 	return px < tileX+tileSize && px+pw > tileX && py < tileY+tileSize && py+ph > tileY
 }
 
-func (p *Player) tryCornerCorrection(dx, dy float64, game *Game, bombPositions []struct{ X, Y int }) (float64, float64, bool) {
+func (p *Player) tryCornerCorrection(dx, dy float64, game *Game, bombPositions []struct{ X, Y int }, explosionCells []GridPos) (float64, float64, bool) {
 	if dx == 0 && dy == 0 {
 		return 0, 0, false
 	}
@@ -404,7 +416,7 @@ func (p *Player) tryCornerCorrection(dx, dy float64, game *Game, bombPositions [
 		}
 		newY := p.Y + step
 		newX := p.X + dx
-		if game.Map.CanMoveTo(int(newX), int(newY), p.Width, p.Height, bombPositions) {
+		if game.Map.CanMoveTo(int(newX), int(newY), p.Width, p.Height, bombPositions, explosionCells) {
 			return newX, newY, true
 		}
 		return 0, 0, false
@@ -424,13 +436,13 @@ func (p *Player) tryCornerCorrection(dx, dy float64, game *Game, bombPositions [
 	}
 	newX := p.X + step
 	newY := p.Y + dy
-	if game.Map.CanMoveTo(int(newX), int(newY), p.Width, p.Height, bombPositions) {
+	if game.Map.CanMoveTo(int(newX), int(newY), p.Width, p.Height, bombPositions, explosionCells) {
 		return newX, newY, true
 	}
 	return 0, 0, false
 }
 
-func (p *Player) applySoftAlign(dx, dy float64, game *Game, bombPositions []struct{ X, Y int }) {
+func (p *Player) applySoftAlign(dx, dy float64, game *Game, bombPositions []struct{ X, Y int }, explosionCells []GridPos) {
 	if dx == 0 && dy == 0 {
 		return
 	}
@@ -452,7 +464,7 @@ func (p *Player) applySoftAlign(dx, dy float64, game *Game, bombPositions []stru
 			step = -step
 		}
 		newY := p.Y + step
-		if game.Map.CanMoveTo(int(p.X), int(newY), p.Width, p.Height, bombPositions) {
+		if game.Map.CanMoveTo(int(p.X), int(newY), p.Width, p.Height, bombPositions, explosionCells) {
 			p.Y = newY
 		}
 		return
@@ -471,7 +483,7 @@ func (p *Player) applySoftAlign(dx, dy float64, game *Game, bombPositions []stru
 		step = -step
 	}
 	newX := p.X + step
-	if game.Map.CanMoveTo(int(newX), int(p.Y), p.Width, p.Height, bombPositions) {
+	if game.Map.CanMoveTo(int(newX), int(p.Y), p.Width, p.Height, bombPositions, explosionCells) {
 		p.X = newX
 	}
 }

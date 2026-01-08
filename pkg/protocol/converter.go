@@ -168,15 +168,26 @@ func CoreExplosionToProto(e *core.Explosion) *gamev1.ExplosionState {
 		}
 	}
 
+	// 转换地图变化
+	tileChanges := make([]*gamev1.TileChange, len(e.TileChanges))
+	for i, tc := range e.TileChanges {
+		tileChanges[i] = &gamev1.TileChange{
+			X:       int32(tc.X),
+			Y:       int32(tc.Y),
+			NewType: int32(tc.NewType),
+		}
+	}
+
 	// 将帧转换为毫秒
 	elapsedMs := (core.BombExplosionFrames - e.FramesRemaining) * 1000 / core.TPS
 
 	return &gamev1.ExplosionState{
-		CenterX:   int32(e.CenterX),
-		CenterY:   int32(e.CenterY),
-		Range:     int32(e.Range),
-		ElapsedMs: int64(elapsedMs),
-		Cells:     cells,
+		CenterX:     int32(e.CenterX),
+		CenterY:     int32(e.CenterY),
+		Range:       int32(e.Range),
+		ElapsedMs:   int64(elapsedMs),
+		Cells:       cells,
+		TileChanges: tileChanges,
 	}
 }
 
@@ -208,6 +219,17 @@ func ProtoExplosionToCore(e *gamev1.ExplosionState) *core.Explosion {
 		gridPosCells[i] = core.GridPos{X: int(cell.GridX), Y: int(cell.GridY)}
 	}
 
+	// 转换地图变化
+	tileChanges := make([]core.TileChange, len(e.TileChanges))
+	for i, tc := range e.TileChanges {
+		tileChanges[i] = core.TileChange{
+			X:       int(tc.X),
+			Y:       int(tc.Y),
+			OldType: core.TileBrick, // 无法从 proto 获取旧类型
+			NewType: core.TileType(tc.NewType),
+		}
+	}
+
 	return &core.Explosion{
 		CenterX:         int(e.CenterX),
 		CenterY:         int(e.CenterY),
@@ -216,6 +238,7 @@ func ProtoExplosionToCore(e *gamev1.ExplosionState) *core.Explosion {
 		CreatedAtFrame:  0, // 从 proto 无法获取
 		Cells:           gridPosCells,
 		OwnerID:         0, // 从 proto 无法获取
+		TileChanges:     tileChanges,
 	}
 }
 

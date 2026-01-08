@@ -290,8 +290,8 @@ func (ngc *NetworkGameClient) reconcileLocalPlayer(corePlayer *core.Player, prot
 
 // calculateMoveDelta 根据输入计算移动增量
 func (ngc *NetworkGameClient) calculateMoveDelta(input PendingInput) (float64, float64) {
-	deltaTime := 1.0 / FPS
-	speed := core.PlayerDefaultSpeed * deltaTime
+	// 使用与服务器一致的速度（像素/帧）
+	speed := core.PlayerSpeedPerFrame
 
 	dx, dy := 0.0, 0.0
 	if input.Up {
@@ -383,13 +383,12 @@ func (ngc *NetworkGameClient) syncExplosions(protoExplosions []*gamev1.Explosion
 		if explosion != nil {
 			ngc.game.coreGame.Explosions = append(ngc.game.coreGame.Explosions, explosion)
 
-			// 增量同步地图：根据爆炸范围清理砖块
-			// 因为客户端不再进行权威计算（IsAuthoritative=false），且服务器可能仅在初始时刻发送全量地图，
-			// 所以我们需要依赖服务器发来的爆炸范围来即时更新本地地图状态。
-			for _, cell := range explosion.Cells {
-				if ngc.game.coreGame.Map.GetTile(cell.X, cell.Y) == core.TileBrick {
-					ngc.game.coreGame.Map.SetTile(cell.X, cell.Y, core.TileEmpty)
-				}
+			// 增量同步地图：使用服务器发来的 TileChanges
+			// 这样可以正确处理：
+			// 1. 砖块被炸毁 -> 变成空地 (TileEmpty)
+			// 2. 隐藏门被炸开 -> 变成门 (TileDoor)
+			for _, tc := range explosion.TileChanges {
+				ngc.game.coreGame.Map.SetTile(tc.X, tc.Y, tc.NewType)
 			}
 		}
 	}
