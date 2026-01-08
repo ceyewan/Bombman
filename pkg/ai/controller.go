@@ -829,67 +829,88 @@ func (c *AIController) isBlockedByBomb(pos GridPos, game *core.Game) bool {
 }
 
 // canPlaceBombSafelyAt 检查在指定位置是否可以安全放置炸弹
+// 改进版：防止连环自杀，增加障碍物模拟
 func (c *AIController) canPlaceBombSafelyAt(pos GridPos, game *core.Game) bool {
-	// 1. 检查位置是否已有炸弹
+	// 🛑 规则 1: 只有在绝对安全的地方才能放炸弹
+	// 如果当前位置已经有危险（比如在另一个炸弹的波及范围内），禁止“火上浇油”
+	// 这能有效防止 AI 连续放置两个炸弹导致自己无路可逃
+	if c.dangerGrid.Cells[pos.Y][pos.X] > 0 {
+		return false
+	}
+
+	// 🛑 规则 2: 检查位置是否已有炸弹（物理重叠）
 	if c.isBlockedByBomb(pos, game) {
 		return false
 	}
 
-	// 2. 模拟爆炸范围
-	simulatedRange := 2
-	dangerMap := make(map[GridPos]bool)
+	// === 步骤 A: 模拟新炸弹的爆炸范围 ===
+	simulatedRange := 3 // 假设炸弹威力 (建议与 hasBrickInRange 保持一致)
+	newBombDangerZone := make(map[GridPos]bool)
 
-	// 简单计算十字范围
-	dangerMap[GridPos{pos.X, pos.Y}] = true
+	// 标记中心和十字范围
+	newBombDangerZone[pos] = true
 	dirs := []GridPos{{0, 1}, {0, -1}, {1, 0}, {-1, 0}}
+
 	for _, d := range dirs {
 		for i := 1; i <= simulatedRange; i++ {
 			nx, ny := pos.X+d.X*i, pos.Y+d.Y*i
+			// 越界检查
 			if nx < 0 || nx >= core.MapWidth || ny < 0 || ny >= core.MapHeight {
 				break
 			}
+
 			tile := game.Map.GetTile(nx, ny)
 			if tile == core.TileWall {
 				break
-			}
+			} // 墙壁阻挡
 
-			dangerMap[GridPos{nx, ny}] = true
+			newBombDangerZone[GridPos{nx, ny}] = true
 
 			if tile == core.TileBrick {
 				break
-			}
+			} // 砖块阻挡（但当前格受波及）
 		}
 	}
 
-	// 3. 使用 BFS 寻找最近的安全点（不在 dangerMap 中的点）
+	// === 步骤 B: BFS 寻找逃生路径 ===
+	// 目标：找到一个既不受旧炸弹威胁，也不受新炸弹威胁的格子
+	// 约束：路径不能穿过墙、砖、旧炸弹、以及**新炸弹**
+
 	type NodeState struct {
 		Pos   GridPos
 		Depth int
 	}
-	qState := []NodeState{{GridPos{pos.X, pos.Y}, 0}}
+	queue := []NodeState{{pos, 0}}
 	visited := make(map[GridPos]bool)
-	visited[GridPos{pos.X, pos.Y}] = true
+	visited[pos] = true
 
-	foundSafeSpot := false
-	maxSearchDepth := 10
+	maxSearchDepth := 10 // 必须在 10 步内逃脱
 
-	for len(qState) > 0 {
-		curr := qState[0]
-		qState = qState[1:]
+	for len(queue) > 0 {
+		curr := queue[0]
+		queue = queue[1:]
 
-		if !dangerMap[curr.Pos] && c.dangerGrid.Cells[curr.Pos.Y][curr.Pos.X] < 0.1 {
-			foundSafeSpot = true
-			break
+		// 1. 检查当前点是否是合格的“避难所”
+		// 条件：
+		// a. 不在新炸弹的爆炸范围内
+		// b. 不在旧炸弹的危险区内 (Danger == 0)
+		// c. 不是当前放置炸弹的位置（必须移动开）
+		if !newBombDangerZone[curr.Pos] &&
+			c.dangerGrid.Cells[curr.Pos.Y][curr.Pos.X] == 0 &&
+			(curr.Pos != pos) {
+			return true // 找到了生路！可以放炸弹。
 		}
 
 		if curr.Depth >= maxSearchDepth {
 			continue
 		}
 
+		// 2. 拓展路径
 		for _, d := range dirs {
 			nx, ny := curr.Pos.X+d.X, curr.Pos.Y+d.Y
 			nextPos := GridPos{nx, ny}
 
+			// 越界与访问检查
 			if nx < 0 || nx >= core.MapWidth || ny < 0 || ny >= core.MapHeight {
 				continue
 			}
@@ -897,22 +918,36 @@ func (c *AIController) canPlaceBombSafelyAt(pos GridPos, game *core.Game) bool {
 				continue
 			}
 
+			// 障碍物检查
 			tile := game.Map.GetTile(nx, ny)
 			if tile == core.TileWall || tile == core.TileBrick {
 				continue
 			}
 
-			blockedByBomb := c.isBlockedByBomb(nextPos, game)
-			if blockedByBomb {
+			// 🛑 关键修正：将“即将放置的炸弹”视为障碍物
+			// 也就是：一旦离开起点，就不能再走回起点（因为那里会有个炸弹）
+			if nextPos == pos {
+				continue
+			}
+
+			// 旧炸弹阻挡
+			if c.isBlockedByBomb(nextPos, game) {
+				continue
+			}
+
+			// 危险路径检查：逃跑路径本身不能太危险
+			// 如果路径上的危险值太高，说明我们要穿过火海去安全点，这是不行的
+			if c.dangerGrid.Cells[ny][nx] > 0.5 {
 				continue
 			}
 
 			visited[nextPos] = true
-			qState = append(qState, NodeState{nextPos, curr.Depth + 1})
+			queue = append(queue, NodeState{nextPos, curr.Depth + 1})
 		}
 	}
 
-	return foundSafeSpot
+	// 遍历完所有可能路径都没找到安全点
+	return false
 }
 
 // ===== 工具函数 =====
