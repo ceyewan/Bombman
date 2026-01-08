@@ -125,18 +125,18 @@ func createLocalGame(character core.CharacterType, controlScheme client.ControlS
 	player := client.NewPlayer(game, 1, x, y, character, false)
 	game.AddPlayer(player)
 
-// 添加 AI 玩家（可选）
-addAIPlayers(game, 3)
+	// 添加 AI 玩家（可选）
+	addAIPlayers(game, 3)
 
-return game
+	return game
 }
 
 // addAIPlayers 添加 AI 玩家（用于测试）
 func addAIPlayers(game *client.Game, count int) {
 	spawns := []struct{ x, y int }{
-		{608, 0},   // 右上角
-		{0, 448},   // 左下角
-		{608, 448}, // 右下角
+		{core.MapWidth - 1, 0},                  // 右上角
+		{0, core.MapHeight - 1},                 // 左下角
+		{core.MapWidth - 1, core.MapHeight - 1}, // 右下角
 	}
 
 	chars := []core.CharacterType{

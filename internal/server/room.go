@@ -3,40 +3,40 @@ package server
 import (
 	"context"
 	"errors"
-"fmt"
-"log"
-"sync"
-"time"
+	"fmt"
+	"log"
+	"sync"
+	"time"
 
-gamev1 "bomberman/api/gen/bomberman/v1"
-"bomberman/pkg/ai"
-"bomberman/pkg/core"
-"bomberman/pkg/protocol"
+	gamev1 "bomberman/api/gen/bomberman/v1"
+	"bomberman/pkg/ai"
+	"bomberman/pkg/core"
+	"bomberman/pkg/protocol"
 )
 
 type Room struct {
-ctx    context.Context
-cancel context.CancelFunc
+	ctx    context.Context
+	cancel context.CancelFunc
 
-game    *core.Game
-frameID int32
-state   GameState
-resetAt time.Time
+	game    *core.Game
+	frameID int32
+	state   GameState
+	resetAt time.Time
 
-enableAI      bool
-aiControllers map[int32]*ai.AIController
+	enableAI      bool
+	aiControllers map[int32]*ai.AIController
 
-connections     map[int32]*Connection
-nextPlayerID    int32
-inputQueue      map[int32]*gamev1.ClientInput
-sendQueueFullAt map[int32]time.Time
+	connections     map[int32]*Connection
+	nextPlayerID    int32
+	inputQueue      map[int32]*gamev1.ClientInput
+	sendQueueFullAt map[int32]time.Time
 
-// 客户端预测支持：记录每个玩家最后处理的输入序号
-lastProcessedInputSeq map[int32]int32
+	// 客户端预测支持：记录每个玩家最后处理的输入序号
+	lastProcessedInputSeq map[int32]int32
 
-joinCh  chan joinRequest
-inputCh chan inputEvent
-leaveCh chan int32
+	joinCh  chan joinRequest
+	inputCh chan inputEvent
+	leaveCh chan int32
 }
 
 type joinRequest struct {
@@ -51,25 +51,25 @@ type inputEvent struct {
 }
 
 func NewRoom(parent context.Context, enableAI bool) *Room {
-ctx, cancel := context.WithCancel(parent)
+	ctx, cancel := context.WithCancel(parent)
 
-return &Room{
-ctx:                   ctx,
-cancel:                cancel,
-game:                  core.NewGame(),
-frameID:               0,
-state:                 StateWaiting,
-enableAI:              enableAI,
-aiControllers:         make(map[int32]*ai.AIController),
-connections:           make(map[int32]*Connection),
-nextPlayerID:          1,
-inputQueue:            make(map[int32]*gamev1.ClientInput),
-sendQueueFullAt:       make(map[int32]time.Time),
-lastProcessedInputSeq: make(map[int32]int32),
-joinCh:                make(chan joinRequest),
-inputCh:               make(chan inputEvent, 256),
-leaveCh:               make(chan int32, 256),
-}
+	return &Room{
+		ctx:                   ctx,
+		cancel:                cancel,
+		game:                  core.NewGame(),
+		frameID:               0,
+		state:                 StateWaiting,
+		enableAI:              enableAI,
+		aiControllers:         make(map[int32]*ai.AIController),
+		connections:           make(map[int32]*Connection),
+		nextPlayerID:          1,
+		inputQueue:            make(map[int32]*gamev1.ClientInput),
+		sendQueueFullAt:       make(map[int32]time.Time),
+		lastProcessedInputSeq: make(map[int32]int32),
+		joinCh:                make(chan joinRequest),
+		inputCh:               make(chan inputEvent, 256),
+		leaveCh:               make(chan int32, 256),
+	}
 }
 
 func (r *Room) Run(wg *sync.WaitGroup) {
@@ -151,11 +151,11 @@ func (r *Room) tick() {
 		return
 	}
 
-r.applyInputs()
-r.updateAI()
+	r.applyInputs()
+	r.updateAI()
 
-// 更新核心游戏逻辑
-r.game.Update(1.0 / ServerTPS)
+	// 更新核心游戏逻辑
+	r.game.Update(1.0 / ServerTPS)
 
 	// 增加帧 ID
 	r.frameID++
@@ -258,18 +258,18 @@ func (r *Room) handleJoin(req joinRequest) {
 	}
 
 	log.Printf("玩家 %d 加入，角色: %s, 出生点: (%d, %d)", playerID, characterType, x, y)
-log.Printf("玩家 %d 游戏开始消息已发送", playerID)
+	log.Printf("玩家 %d 游戏开始消息已发送", playerID)
 
-if r.state != StateRunning {
-r.state = StateRunning
-}
+	if r.state != StateRunning {
+		r.state = StateRunning
+	}
 
-// 尝试添加 AI 玩家
-if r.enableAI {
-r.tryFillWithAI()
-}
+	// 尝试添加 AI 玩家
+	if r.enableAI {
+		r.tryFillWithAI()
+	}
 
-req.respCh <- nil
+	req.respCh <- nil
 }
 
 func (r *Room) handleInput(ev inputEvent) {
@@ -330,12 +330,12 @@ func (r *Room) resetRoom() {
 	r.frameID = 0
 	r.state = StateWaiting
 	r.resetAt = time.Time{}
-r.nextPlayerID = 1
-r.aiControllers = make(map[int32]*ai.AIController)
-r.connections = make(map[int32]*Connection)
-r.inputQueue = make(map[int32]*gamev1.ClientInput)
-r.sendQueueFullAt = make(map[int32]time.Time)
-r.lastProcessedInputSeq = make(map[int32]int32)
+	r.nextPlayerID = 1
+	r.aiControllers = make(map[int32]*ai.AIController)
+	r.connections = make(map[int32]*Connection)
+	r.inputQueue = make(map[int32]*gamev1.ClientInput)
+	r.sendQueueFullAt = make(map[int32]time.Time)
+	r.lastProcessedInputSeq = make(map[int32]int32)
 }
 
 func (r *Room) closeAllConnections(notify bool) {
@@ -484,67 +484,70 @@ func (r *Room) removePlayerByID(playerID int32) {
 
 // updateAI 更新 AI 玩家
 func (r *Room) updateAI() {
-if len(r.aiControllers) == 0 {
-return
-}
+	if len(r.aiControllers) == 0 {
+		return
+	}
 
-dt := 1.0 / float64(ServerTPS)
-for id, controller := range r.aiControllers {
-input := controller.Decide(r.game, dt)
-core.ApplyInput(r.game, int(id), input, dt)
-}
+	dt := 1.0 / float64(ServerTPS)
+	for id, controller := range r.aiControllers {
+		input := controller.Decide(r.game, dt)
+		core.ApplyInput(r.game, int(id), input, dt)
+	}
 }
 
 // tryFillWithAI 尝试用 AI 填满房间
 func (r *Room) tryFillWithAI() {
-// 只在有真实玩家且房间未满时添加 AI
-if len(r.connections) == 0 || len(r.game.Players) >= MaxPlayers {
-return
-}
+	// 只在有真实玩家且房间未满时添加 AI
+	if len(r.connections) == 0 || len(r.game.Players) >= MaxPlayers {
+		return
+	}
 
-// 可用的角色类型
-availableChars := []core.CharacterType{
-core.CharacterWhite,
-core.CharacterBlack,
-core.CharacterBlue,
-core.CharacterRed,
-}
+	// 可用的角色类型
+	availableChars := []core.CharacterType{
+		core.CharacterWhite,
+		core.CharacterBlack,
+		core.CharacterBlue,
+		core.CharacterRed,
+	}
 
-for len(r.game.Players) < MaxPlayers {
-playerID := r.nextPlayerID
-r.nextPlayerID++
+	for len(r.game.Players) < MaxPlayers {
+		playerID := r.nextPlayerID
+		r.nextPlayerID++
 
-x, y := getSpawnPosition(int(playerID))
-charType := availableChars[(playerID-1)%int32(len(availableChars))]
+		x, y := getSpawnPosition(int(playerID))
+		charType := availableChars[(playerID-1)%int32(len(availableChars))]
 
-player := core.NewPlayer(int(playerID), x, y, charType)
-player.IsSimulated = true // 在 Server 端这也是 Simulated? 不，这里 IsSimulated 含义有点混乱
-// IsSimulated 应该主要用于客户端区分本地玩家和远程/AI玩家
-// 在服务端，所有 Player 都是数据。
-// 为了保持一致，先设为 true，尽管服务端不通过 handleInput 控制它
-// 其实在服务端 core.Player 的 IsSimulated 字段没啥大用，除非我们复用 createLocalGame 的逻辑
-player.IsSimulated = true
+		player := core.NewPlayer(int(playerID), x, y, charType)
+		player.IsSimulated = true // 在 Server 端这也是 Simulated? 不，这里 IsSimulated 含义有点混乱
+		// IsSimulated 应该主要用于客户端区分本地玩家和远程/AI玩家
+		// 在服务端，所有 Player 都是数据。
+		// 为了保持一致，先设为 true，尽管服务端不通过 handleInput 控制它
+		// 其实在服务端 core.Player 的 IsSimulated 字段没啥大用，除非我们复用 createLocalGame 的逻辑
+		player.IsSimulated = true
 
-r.game.AddPlayer(player)
+		r.game.AddPlayer(player)
 
-// 创建 AI 控制器
-r.aiControllers[playerID] = ai.NewAIController(int(playerID))
+		// 创建 AI 控制器
+		r.aiControllers[playerID] = ai.NewAIController(int(playerID))
 
-log.Printf("添加 AI 玩家 %d", playerID)
-}
+		log.Printf("添加 AI 玩家 %d", playerID)
+	}
 }
 
 // getSpawnPosition 根据玩家 ID 获取出生点
 func getSpawnPosition(playerID int) (int, int) {
-	// 4 个角落的位置
-	spawns := []struct{ x, y int }{
-		{0, 0},     // 玩家 1: 左上角
-		{608, 0},   // 玩家 2: 右上角
-		{0, 448},   // 玩家 3: 左下角
-		{608, 448}, // 玩家 4: 右下角
+	// 4 个角落的格子坐标
+	spawns := []struct{ gx, gy int }{
+		{0, 0},                                  // 玩家 1: 左上角
+		{core.MapWidth - 1, 0},                  // 玩家 2: 右上角
+		{0, core.MapHeight - 1},                 // 玩家 3: 左下角
+		{core.MapWidth - 1, core.MapHeight - 1}, // 玩家 4: 右下角
 	}
 
 	// 取模，支持任意数量的玩家
 	index := (playerID - 1) % len(spawns)
-	return spawns[index].x, spawns[index].y
+	gx, gy := spawns[index].gx, spawns[index].gy
+
+	// 转换为像素坐标（带中心偏移）
+	return core.GridToPlayerXY(gx, gy)
 }
