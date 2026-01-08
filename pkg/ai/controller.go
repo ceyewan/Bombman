@@ -97,13 +97,26 @@ func (c *AIController) Decide(game *core.Game, deltaTime float64) core.Input {
 
 	// 思考频率控制（性能优化）
 	c.thinkTimer -= deltaTime
+
+	// 如果缓存的决策包含放炸弹，强制立即重新思考（防止连续放炸弹或放完发呆）
+	if c.cachedInput.Bomb {
+		c.thinkTimer = 0
+	}
+
 	if c.thinkTimer > 0 {
 		return c.cachedInput // 返回缓存的决策
 	}
 
 	// 重新思考
 	c.thinkTimer = c.thinkInterval
-	c.cachedInput = c.thinkLogic(game, player, deltaTime)
+	newInput := c.thinkLogic(game, player, deltaTime)
+
+	// 如果新决策是放炸弹，不要缓存太久，确保下一帧能立即反应过来逃跑
+	if newInput.Bomb {
+		c.thinkTimer = 0 // 下一帧立即重新思考
+	}
+
+	c.cachedInput = newInput
 	return c.cachedInput
 }
 
@@ -118,6 +131,9 @@ func (c *AIController) thinkLogic(game *core.Game, player *core.Player, deltaTim
 	// 行为树（优先级从高到低）
 
 	// 1. 生存优先：如果当前位置危险，逃跑！
+	// 注意：如果刚放了炸弹，dangerGrid 可能还没更新（炸弹还没生成），
+	// 但 thinkLogic 是在放炸弹后的下一帧调用的（因为 thinkTimer=0），
+	// 所以只要游戏状态更新了，这里就能检测到危险。
 	if c.isInDanger(player) {
 		return c.escape(player, game)
 	}
@@ -211,9 +227,17 @@ func (dg *DangerGrid) addBombDanger(bomb *core.Bomb, gameMap *core.GameMap) {
 
 // isInDanger 检查玩家是否处于危险中
 func (c *AIController) isInDanger(player *core.Player) bool {
-	gridX, gridY := core.PlayerXYToGrid(int(player.X), int(player.Y))
+	// 修正：使用玩家中心点来判断是否在危险中，而不是左上角
+	// 这与游戏核心的碰撞检测逻辑一致
+	centerX := int(player.X + float64(player.Width)/2)
+	centerY := int(player.Y + float64(player.Height)/2)
+	gridX, gridY := core.PlayerXYToGrid(centerX, centerY)
+
 	// 降低危险阈值，更敏感地躲避炸弹
-	return c.dangerGrid.Cells[gridY][gridX] > 0.05 // 只要有一点危险就逃跑
+	if gridX >= 0 && gridX < core.MapWidth && gridY >= 0 && gridY < core.MapHeight {
+		return c.dangerGrid.Cells[gridY][gridX] > 0.05
+	}
+	return false
 }
 
 // escape 逃跑（BFS 寻找最近安全格子）
@@ -399,9 +423,10 @@ func (c *AIController) getNextStep(player *core.Player, target GridPos, game *co
 func (c *AIController) moveToCell(player *core.Player, targetGrid GridPos) core.Input {
 	input := core.Input{}
 
-	// 目标中心像素坐标
-	targetPixelX := float64(targetGrid.X * core.TileSize)
-	targetPixelY := float64(targetGrid.Y * core.TileSize)
+	// 目标中心像素坐标（修正：使用 GridToPlayerXY 获取中心对齐的坐标）
+	tx, ty := core.GridToPlayerXY(targetGrid.X, targetGrid.Y)
+	targetPixelX := float64(tx)
+	targetPixelY := float64(ty)
 	currentGridX, currentGridY := core.PlayerXYToGrid(int(player.X), int(player.Y))
 
 	// 容差：越小越精准，建议 2.0 或更小以确保顺利进洞
@@ -486,7 +511,7 @@ func (c *AIController) canPlaceBombSafely(player *core.Player, game *core.Game) 
 	}
 
 	// 2. 模拟爆炸范围
-	simulatedRange := 2 // 假设炸弹范围
+	simulatedRange := core.DefaultExplosionRange
 	dangerMap := make(map[GridPos]bool)
 
 	// 简单计算十字范围
@@ -793,7 +818,7 @@ func (c *AIController) pickNewRandomDirection() {
 
 // hasBrickInRange 检查在 pos 位置放置炸弹，能否炸毁任何砖块（范围 3 格）
 func (c *AIController) hasBrickInRange(pos GridPos, game *core.Game) bool {
-	bombRange := 3
+	bombRange := core.DefaultExplosionRange
 	dirs := []GridPos{{0, -1}, {0, 1}, {-1, 0}, {1, 0}}
 
 	for _, d := range dirs {
@@ -844,7 +869,7 @@ func (c *AIController) canPlaceBombSafelyAt(pos GridPos, game *core.Game) bool {
 	}
 
 	// === 步骤 A: 模拟新炸弹的爆炸范围 ===
-	simulatedRange := 3 // 假设炸弹威力 (建议与 hasBrickInRange 保持一致)
+	simulatedRange := core.DefaultExplosionRange // 假设炸弹威力 (建议与 hasBrickInRange 保持一致)
 	newBombDangerZone := make(map[GridPos]bool)
 
 	// 标记中心和十字范围
@@ -884,7 +909,7 @@ func (c *AIController) canPlaceBombSafelyAt(pos GridPos, game *core.Game) bool {
 	visited := make(map[GridPos]bool)
 	visited[pos] = true
 
-	maxSearchDepth := 10 // 必须在 10 步内逃脱
+	maxSearchDepth := 6 // 必须在 6 步内逃脱 (约 1.5 秒路程，给自己留 0.5 秒余量)
 
 	for len(queue) > 0 {
 		curr := queue[0]

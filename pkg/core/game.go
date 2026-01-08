@@ -88,22 +88,15 @@ func (g *Game) createExplosion(bomb *Bomb) {
 			continue
 		}
 
-		// 玩家包围盒
-		pLeft := player.X
-		pRight := player.X + float64(player.Width)
-		pTop := player.Y
-		pBottom := player.Y + float64(player.Height)
+		// 计算玩家中心点所在的格子
+		centerX := player.X + float64(player.Width)/2
+		centerY := player.Y + float64(player.Height)/2
+		pGridX := int(centerX) / TileSize
+		pGridY := int(centerY) / TileSize
 
 		for _, cell := range explosion.Cells {
-			// 爆炸格子包围盒
-			cLeft := float64(cell.GridX * TileSize)
-			cRight := float64((cell.GridX + 1) * TileSize)
-			cTop := float64(cell.GridY * TileSize)
-			cBottom := float64((cell.GridY + 1) * TileSize)
-
-			// AABB 碰撞检测
-			if pLeft < cRight && pRight > cLeft &&
-				pTop < cBottom && pBottom > cTop {
+			// 判定中心点是否在爆炸格子内
+			if cell.GridX == pGridX && cell.GridY == pGridY {
 				player.Dead = true
 				break
 			}
