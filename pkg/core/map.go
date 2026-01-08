@@ -25,21 +25,26 @@ type GameMap struct {
 
 // NewGameMap 创建新地图
 func NewGameMap() *GameMap {
+	return NewGameMapWithSeed(time.Now().UnixNano())
+}
+
+// NewGameMapWithSeed 使用指定种子创建新地图（用于确定性）
+func NewGameMapWithSeed(seed int64) *GameMap {
 	m := &GameMap{
 		Tiles: make([][]TileType, MapHeight),
 		Width:  MapWidth,
 		Height: MapHeight,
 	}
 
-	// 使用地图模板
-	m.loadMapTemplate()
+	// 使用地图模板（带种子）
+	m.loadMapTemplateWithSeed(seed)
 
 	return m
 }
 
-// loadMapTemplate 加载地图模板 - 有趣的对称设计
-func (m *GameMap) loadMapTemplate() {
-	rand.Seed(time.Now().UnixNano())
+// loadMapTemplateWithSeed 加载地图模板（带种子，用于确定性）
+func (m *GameMap) loadMapTemplateWithSeed(seed int64) {
+	rand.Seed(seed)
 
 	// 地图模板：W=墙壁, B=砖块, .=空地
 	// 设计一个更开阔的地图，边缘也可以活动 (20x15)

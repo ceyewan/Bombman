@@ -92,14 +92,14 @@ func (ngc *NetworkGameClient) Update() error {
 	ngc.updateRemotePlayersInterpolation()
 
 	// 5. 更新游戏逻辑（炸弹冷却等）
-	ngc.game.coreGame.Update(1.0 / FPS)
+	ngc.game.coreGame.Update()
 
 	// 6. 同步渲染器
 	ngc.game.syncRenderers()
 
 	// 7. 更新玩家动画
 	for _, player := range ngc.game.players {
-		player.UpdateAnimation(1.0 / FPS)
+		player.UpdateAnimation(core.FrameSeconds)
 	}
 
 	// 8. 处理网络事件
@@ -387,8 +387,8 @@ func (ngc *NetworkGameClient) syncExplosions(protoExplosions []*gamev1.Explosion
 			// 因为客户端不再进行权威计算（IsAuthoritative=false），且服务器可能仅在初始时刻发送全量地图，
 			// 所以我们需要依赖服务器发来的爆炸范围来即时更新本地地图状态。
 			for _, cell := range explosion.Cells {
-				if ngc.game.coreGame.Map.GetTile(cell.GridX, cell.GridY) == core.TileBrick {
-					ngc.game.coreGame.Map.SetTile(cell.GridX, cell.GridY, core.TileEmpty)
+				if ngc.game.coreGame.Map.GetTile(cell.X, cell.Y) == core.TileBrick {
+					ngc.game.coreGame.Map.SetTile(cell.X, cell.Y, core.TileEmpty)
 				}
 			}
 		}

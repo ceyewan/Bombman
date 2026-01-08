@@ -10,7 +10,8 @@ type Input struct {
 }
 
 // ApplyInput 将输入应用到指定玩家
-func ApplyInput(game *Game, playerID int, input Input, deltaTime float64) bool {
+// 速度现在是像素/帧，不再需要 deltaTime
+func ApplyInput(game *Game, playerID int, input Input, currentFrame int32) bool {
 	if game == nil {
 		return false
 	}
@@ -20,8 +21,8 @@ func ApplyInput(game *Game, playerID int, input Input, deltaTime float64) bool {
 		return false
 	}
 
-	// 计算移动距离
-	speed := player.Speed * deltaTime
+	// 速度已经是像素/帧，直接使用
+	speed := player.Speed
 
 	// 处理移动
 	if input.Up {
@@ -39,7 +40,7 @@ func ApplyInput(game *Game, playerID int, input Input, deltaTime float64) bool {
 
 	// 处理炸弹
 	if input.Bomb {
-		bomb := player.PlaceBomb(game)
+		bomb := player.PlaceBomb(game, currentFrame)
 		if bomb != nil {
 			game.AddBomb(bomb)
 			return true

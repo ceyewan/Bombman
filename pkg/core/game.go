@@ -7,6 +7,8 @@ type Game struct {
 	Bombs           []*Bomb
 	Explosions      []*Explosion
 	IsAuthoritative bool // 是否由于权威逻辑（控制爆炸、伤害判定等）
+	CurrentFrame    int32 // 当前帧号
+	Seed            int64 // 随机种子（用于确定性）
 }
 
 // NewGame 创建新游戏
@@ -17,6 +19,21 @@ func NewGame() *Game {
 		Bombs:           make([]*Bomb, 0),
 		Explosions:      make([]*Explosion, 0),
 		IsAuthoritative: true, // 默认开启权威逻辑（单机模式）
+		CurrentFrame:    0,
+		Seed:            0,
+	}
+}
+
+// NewGameWithSeed 使用指定种子创建新游戏
+func NewGameWithSeed(seed int64) *Game {
+	return &Game{
+		Map:             NewGameMapWithSeed(seed),
+		Players:         make([]*Player, 0),
+		Bombs:           make([]*Bomb, 0),
+		Explosions:      make([]*Explosion, 0),
+		IsAuthoritative: true,
+		CurrentFrame:    0,
+		Seed:            seed,
 	}
 }
 
@@ -30,59 +47,109 @@ func (g *Game) AddBomb(bomb *Bomb) {
 	g.Bombs = append(g.Bombs, bomb)
 }
 
-// Update 更新游戏状态
-func (g *Game) Update(deltaTime float64) {
-	// 更新玩家
+// Update 每帧更新游戏状态（不再需要 deltaTime）
+func (g *Game) Update() {
+	g.CurrentFrame++
+
+	// 1. 更新玩家
 	for _, player := range g.Players {
-		player.Update(deltaTime, g)
+		player.Update(g)
 	}
 
-	// 更新炸弹
-	for i := len(g.Bombs) - 1; i >= 0; i-- {
-		bomb := g.Bombs[i]
-		bomb.Update(deltaTime)
-		// 只有权威模式（单机或服务器）才处理爆炸逻辑
-		// 客户端联机模式只负责渲染，不处理逻辑
-		if g.IsAuthoritative && bomb.IsExploded() {
-			// 炸弹爆炸
-			g.createExplosion(bomb)
-			// 移除炸弹
-			g.Bombs = append(g.Bombs[:i], g.Bombs[i+1:]...)
+	// 2. 更新炸弹
+	g.updateBombs()
+
+	// 3. 更新爆炸
+	g.updateExplosions()
+}
+
+// updateBombs 更新所有炸弹
+func (g *Game) updateBombs() {
+	// 收集需要爆炸的炸弹
+	explodingBombs := make([]*Bomb, 0)
+
+	for _, bomb := range g.Bombs {
+		if bomb.Update() {
+			explodingBombs = append(explodingBombs, bomb)
 		}
 	}
 
-	// 更新爆炸效果
-	for i := len(g.Explosions) - 1; i >= 0; i-- {
-		explosion := g.Explosions[i]
-		explosion.Update(deltaTime)
-		if explosion.IsExpired() {
-			// 移除爆炸效果
-			g.Explosions = append(g.Explosions[:i], g.Explosions[i+1:]...)
+	// 处理爆炸（可能触发连锁）
+	for _, bomb := range explodingBombs {
+		g.explodeBomb(bomb)
+	}
+
+	// 移除已爆炸的炸弹
+	if g.IsAuthoritative {
+		newBombs := make([]*Bomb, 0, len(g.Bombs))
+		for _, bomb := range g.Bombs {
+			if !bomb.Exploded {
+				newBombs = append(newBombs, bomb)
+			}
 		}
+		g.Bombs = newBombs
 	}
 }
 
-// createExplosion 创建爆炸效果
-func (g *Game) createExplosion(bomb *Bomb) {
-	gridX, gridY := bomb.GetGridPosition()
+// explodeBomb 处理单个炸弹爆炸
+func (g *Game) explodeBomb(bomb *Bomb) {
+	if bomb.Exploded {
+		return
+	}
+	bomb.Exploded = true
 
-	explosion := NewExplosion(gridX, gridY, bomb.ExplosionRange)
-	explosion.Duration = bomb.ExplosionDuration
-	explosion.Cells = explosion.CalculateExplosionCells(g.Map)
+	// 获取爆炸格子
+	cells := bomb.GetExplosionCells(g.Map)
+
+	// 创建爆炸效果
+	explosion := NewExplosion(bomb.X, bomb.Y, bomb.ExplosionRange, g.CurrentFrame, bomb.OwnerID)
+	// 将 GridPos 转换为内部 Cells 格式
+	explosion.Cells = make([]GridPos, len(cells))
+	copy(explosion.Cells, cells)
+	g.Explosions = append(g.Explosions, explosion)
 
 	// 炸毁砖块
-	for _, cell := range explosion.Cells {
-		if g.Map.GetTile(cell.GridX, cell.GridY) == TileBrick {
+	for _, cell := range cells {
+		if g.Map.GetTile(cell.X, cell.Y) == TileBrick {
 			// 检查是否是隐藏门
-			if cell.GridX == g.Map.HiddenDoorPos.X && cell.GridY == g.Map.HiddenDoorPos.Y {
-				g.Map.SetTile(cell.GridX, cell.GridY, TileDoor)
+			if cell.X == g.Map.HiddenDoorPos.X && cell.Y == g.Map.HiddenDoorPos.Y {
+				g.Map.SetTile(cell.X, cell.Y, TileDoor)
 			} else {
-				g.Map.SetTile(cell.GridX, cell.GridY, TileEmpty)
+				g.Map.SetTile(cell.X, cell.Y, TileEmpty)
 			}
 		}
 	}
 
-	// 检查玩家是否被炸到
+	// 检查连锁爆炸
+	for _, otherBomb := range g.Bombs {
+		if otherBomb.Exploded {
+			continue
+		}
+		for _, cell := range cells {
+			if otherBomb.X == cell.X && otherBomb.Y == cell.Y {
+				g.explodeBomb(otherBomb) // 递归触发
+				break
+			}
+		}
+	}
+
+	// 检查玩家伤害
+	g.checkDamage(explosion)
+}
+
+// updateExplosions 更新所有爆炸
+func (g *Game) updateExplosions() {
+	newExplosions := make([]*Explosion, 0, len(g.Explosions))
+	for _, exp := range g.Explosions {
+		if !exp.Update() {
+			newExplosions = append(newExplosions, exp)
+		}
+	}
+	g.Explosions = newExplosions
+}
+
+// checkDamage 检查玩家伤害
+func (g *Game) checkDamage(explosion *Explosion) {
 	for _, player := range g.Players {
 		if player.Dead {
 			continue
@@ -94,16 +161,35 @@ func (g *Game) createExplosion(bomb *Bomb) {
 		pGridX := int(centerX) / TileSize
 		pGridY := int(centerY) / TileSize
 
+		// 检查是否在爆炸范围内
 		for _, cell := range explosion.Cells {
-			// 判定中心点是否在爆炸格子内
-			if cell.GridX == pGridX && cell.GridY == pGridY {
+			if cell.X == pGridX && cell.Y == pGridY {
 				player.Dead = true
 				break
 			}
 		}
 	}
+}
 
-	g.Explosions = append(g.Explosions, explosion)
+// GetPlayer 获取玩家
+func (g *Game) GetPlayer(id int) *Player {
+	for _, p := range g.Players {
+		if p.ID == id {
+			return p
+		}
+	}
+	return nil
+}
+
+// GetAlivePlayers 获取存活玩家
+func (g *Game) GetAlivePlayers() []*Player {
+	alive := make([]*Player, 0)
+	for _, p := range g.Players {
+		if !p.Dead {
+			alive = append(alive, p)
+		}
+	}
+	return alive
 }
 
 // IsGameOver 检查游戏是否结束

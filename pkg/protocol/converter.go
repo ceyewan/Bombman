@@ -107,37 +107,48 @@ func ProtoPlayerToCore(p *gamev1.PlayerState) *core.Player {
 // ========== Bomb 转换 ==========
 
 // CoreBombToProto 将 core.Bomb 转换为 gamev1.BombState
+// 使用帧为单位的时间，转换为毫秒传输
 func CoreBombToProto(b *core.Bomb) *gamev1.BombState {
 	if b == nil {
 		return nil
 	}
 
-	// 计算剩余时间（毫秒）
-	timeLeftMs := int32(b.TimeToExplode * 1000)
+	// 将帧转换为毫秒（用于网络传输）
+	timeLeftMs := int32(b.FramesUntilExplode) * 1000 / core.TPS
 	if timeLeftMs < 0 {
 		timeLeftMs = 0
 	}
 
 	return &gamev1.BombState{
-		X:              float64(b.X),
-		Y:              float64(b.Y),
+		X:              float64(b.X * core.TileSize), // 格子坐标转像素
+		Y:              float64(b.Y * core.TileSize),
 		TimeLeftMs:     timeLeftMs,
 		ExplosionRange: int32(b.ExplosionRange),
 	}
 }
 
 // ProtoBombToCore 将 gamev1.BombState 转换为 core.Bomb
+// 将毫秒转换为帧
 func ProtoBombToCore(b *gamev1.BombState) *core.Bomb {
 	if b == nil {
 		return nil
 	}
 
+	// 将毫秒转换为帧
+	framesUntilExplode := int(b.TimeLeftMs) * core.TPS / 1000
+
+	// 像素坐标转格子坐标
+	gridX := int(b.X) / core.TileSize
+	gridY := int(b.Y) / core.TileSize
+
 	return &core.Bomb{
-		X:                 int(b.X),
-		Y:                 int(b.Y),
-		TimeToExplode:     float64(b.TimeLeftMs) / 1000,
-		ExplosionRange:    int(b.ExplosionRange),
-		ExplosionDuration: core.DefaultExplosionDurationSeconds,
+		X:                  gridX,
+		Y:                  gridY,
+		FramesUntilExplode: framesUntilExplode,
+		PlacedAtFrame:      0, // 从 proto 无法获取
+		ExplosionRange:     int(b.ExplosionRange),
+		OwnerID:            0, // 从 proto 无法获取
+		Exploded:           false,
 	}
 }
 
@@ -152,16 +163,19 @@ func CoreExplosionToProto(e *core.Explosion) *gamev1.ExplosionState {
 	cells := make([]*gamev1.ExplosionCell, len(e.Cells))
 	for i, cell := range e.Cells {
 		cells[i] = &gamev1.ExplosionCell{
-			GridX: int32(cell.GridX),
-			GridY: int32(cell.GridY),
+			GridX: int32(cell.X),
+			GridY: int32(cell.Y),
 		}
 	}
+
+	// 将帧转换为毫秒
+	elapsedMs := (core.BombExplosionFrames - e.FramesRemaining) * 1000 / core.TPS
 
 	return &gamev1.ExplosionState{
 		CenterX:   int32(e.CenterX),
 		CenterY:   int32(e.CenterY),
 		Range:     int32(e.Range),
-		ElapsedMs: int64(e.Elapsed * 1000),
+		ElapsedMs: int64(elapsedMs),
 		Cells:     cells,
 	}
 }
@@ -172,6 +186,7 @@ func ProtoExplosionToCore(e *gamev1.ExplosionState) *core.Explosion {
 		return nil
 	}
 
+	// 将 GridPos 转换为 ExplosionCell
 	cells := make([]core.ExplosionCell, len(e.Cells))
 	for i, cell := range e.Cells {
 		cells[i] = core.ExplosionCell{
@@ -180,13 +195,27 @@ func ProtoExplosionToCore(e *gamev1.ExplosionState) *core.Explosion {
 		}
 	}
 
+	// 将毫秒转换为帧（对于 Elapsed）
+	elapsedFrames := int(e.ElapsedMs) * core.TPS / 1000
+	framesRemaining := core.BombExplosionFrames - elapsedFrames
+	if framesRemaining < 0 {
+		framesRemaining = 0
+	}
+
+	// 同时创建 GridPos 列表
+	gridPosCells := make([]core.GridPos, len(e.Cells))
+	for i, cell := range e.Cells {
+		gridPosCells[i] = core.GridPos{X: int(cell.GridX), Y: int(cell.GridY)}
+	}
+
 	return &core.Explosion{
-		CenterX:  int(e.CenterX),
-		CenterY:  int(e.CenterY),
-		Range:    int(e.Range),
-		Elapsed:  float64(e.ElapsedMs) / 1000,
-		Duration: core.DefaultExplosionDurationSeconds,
-		Cells:    cells,
+		CenterX:         int(e.CenterX),
+		CenterY:         int(e.CenterY),
+		Range:           int(e.Range),
+		FramesRemaining: framesRemaining,
+		CreatedAtFrame:  0, // 从 proto 无法获取
+		Cells:           gridPosCells,
+		OwnerID:         0, // 从 proto 无法获取
 	}
 }
 

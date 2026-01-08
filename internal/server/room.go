@@ -154,11 +154,11 @@ func (r *Room) tick() {
 	r.applyInputs()
 	r.updateAI()
 
-	// 更新核心游戏逻辑
-	r.game.Update(1.0 / ServerTPS)
+	// 更新核心游戏逻辑（帧递增在 Update 内部）
+	r.game.Update()
 
-	// 增加帧 ID
-	r.frameID++
+	// 增加帧 ID（game.CurrentFrame 已在 Update 中递增）
+	r.frameID = r.game.CurrentFrame
 
 	if shouldEnd, winnerID := r.checkGameOver(); shouldEnd {
 		r.handleGameOver(winnerID)
@@ -198,7 +198,8 @@ func (r *Room) applyInput(playerID int32, input *gamev1.ClientInput) {
 		Bomb:  input.Bomb,
 	}
 
-	placed := core.ApplyInput(r.game, int(playerID), ci, 1.0/ServerTPS)
+	// ApplyInput 现在需要帧号而不是 deltaTime
+	placed := core.ApplyInput(r.game, int(playerID), ci, r.frameID)
 	if placed {
 		log.Printf("玩家 %d 放置炸弹", playerID)
 	}
@@ -488,10 +489,9 @@ func (r *Room) updateAI() {
 		return
 	}
 
-	dt := 1.0 / float64(ServerTPS)
 	for id, controller := range r.aiControllers {
-		input := controller.Decide(r.game, dt)
-		core.ApplyInput(r.game, int(id), input, dt)
+		input := controller.Decide(r.game)
+		core.ApplyInput(r.game, int(id), input, r.frameID)
 	}
 }
 

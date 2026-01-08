@@ -49,24 +49,24 @@ return p
 }
 
 // Update 更新玩家状态（输入处理）
-func (p *Player) Update(deltaTime float64, controlScheme ControlScheme, coreGame *core.Game) {
+func (p *Player) Update(controlScheme ControlScheme, coreGame *core.Game, currentFrame int32) {
 // 处理输入
 if !p.corePlayer.Dead {
 if !p.corePlayer.IsSimulated {
-p.handleInput(deltaTime, controlScheme, coreGame)
+p.handleInput(controlScheme, coreGame, currentFrame)
 } else if p.aiController != nil {
 // AI 控制
-input := p.aiController.Decide(coreGame, deltaTime)
-core.ApplyInput(coreGame, p.corePlayer.ID, input, deltaTime)
+input := p.aiController.Decide(coreGame)
+core.ApplyInput(coreGame, p.corePlayer.ID, input, currentFrame)
 }
 }
 
-// 更新动画
-p.renderer.updateAnimation(deltaTime)
+// 更新动画（使用固定时间步长）
+p.renderer.updateAnimation(core.FrameSeconds)
 }
 
 // handleInput 处理键盘输入
-func (p *Player) handleInput(deltaTime float64, controlScheme ControlScheme, coreGame *core.Game) {
+func (p *Player) handleInput(controlScheme ControlScheme, coreGame *core.Game, currentFrame int32) {
 	// 炸弹按键
 	var bombKeyPressed bool
 	if controlScheme == ControlWASD {
@@ -76,14 +76,14 @@ func (p *Player) handleInput(deltaTime float64, controlScheme ControlScheme, cor
 	}
 
 	if bombKeyPressed {
-		bomb := p.corePlayer.PlaceBomb(coreGame)
+		bomb := p.corePlayer.PlaceBomb(coreGame, currentFrame)
 		if bomb != nil {
 			coreGame.AddBomb(bomb)
 		}
 	}
 
-	// 移动距离
-	moveDistance := p.corePlayer.Speed * deltaTime
+	// 移动距离（现在是像素/帧）
+	moveDistance := p.corePlayer.Speed
 
 	// 移动按键
 	var upPressed, downPressed, leftPressed, rightPressed bool

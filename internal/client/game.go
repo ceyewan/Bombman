@@ -101,13 +101,8 @@ func (g *Game) Update() error {
 		return nil
 	}
 
-	// 计算delta time
-	now := time.Now()
-	deltaTime := now.Sub(g.lastUpdateTime).Seconds()
-	g.lastUpdateTime = now
-
-	// 更新核心游戏逻辑
-	g.coreGame.Update(deltaTime)
+	// 更新核心游戏逻辑（不再需要 deltaTime）
+	g.coreGame.Update()
 
 	// 检查游戏是否结束
 	if g.coreGame.IsGameOver() {
@@ -119,7 +114,7 @@ func (g *Game) Update() error {
 
 	// 更新玩家动画和输入
 	for _, player := range g.players {
-		player.Update(deltaTime, g.controlScheme, g.coreGame)
+		player.Update(g.controlScheme, g.coreGame, g.coreGame.CurrentFrame)
 	}
 
 	return nil

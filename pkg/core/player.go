@@ -21,21 +21,31 @@ type StateSnapshot struct {
 }
 
 // Player 玩家（纯逻辑，不包含渲染）
+// 时间单位改为帧（整数）
 type Player struct {
-	ID                    int
-	X, Y                  float64 // 玩家当前位置（渲染位置）
-	Width                 int
-	Height                int
-	Speed                 float64 // 像素/秒
-	Direction             Direction
-	IsMoving              bool
-	Character             CharacterType
-	Dead                  bool
-	BombCooldownSeconds   float64
-	BombCooldownRemaining float64
-	BombIgnoreGridX       int
-	BombIgnoreGridY       int
-	BombIgnoreActive      bool
+	ID        int
+	X, Y      float64 // 玩家当前位置（渲染位置，保留浮点用于平滑移动）
+	Width     int
+	Height    int
+	Direction Direction
+	IsMoving  bool
+	Character CharacterType
+	Dead      bool
+
+	// 冷却时间（帧为单位）
+	BombCooldownFrames int // 炸弹冷却剩余帧数
+
+	// 速度（像素/帧）
+	Speed float64
+
+	// 炸弹穿越（刚放置的炸弹可以走出去）
+	BombIgnoreGridX  int
+	BombIgnoreGridY  int
+	BombIgnoreActive bool
+
+	// 炸弹属性
+	MaxBombs  int // 最大同时炸弹数
+	BombRange int // 炸弹爆炸范围
 
 	// ========== 网络同步相关 ==========
 
@@ -58,21 +68,22 @@ type Player struct {
 // NewPlayer 创建新玩家
 func NewPlayer(id int, x, y int, charType CharacterType) *Player {
 	return &Player{
-		ID:                    id,
-		X:                     float64(x),
-		Y:                     float64(y),
-		Width:                 PlayerWidth,
-		Height:                PlayerHeight,
-		Speed:                 PlayerDefaultSpeed,
-		Direction:             DirDown,
-		IsMoving:              false,
-		Character:             charType,
-		Dead:                  false,
-		BombCooldownSeconds:   BombCooldownSeconds,
-		BombCooldownRemaining: 0,
-		BombIgnoreGridX:       0,
-		BombIgnoreGridY:       0,
-		BombIgnoreActive:      false,
+		ID:                 id,
+		X:                  float64(x),
+		Y:                  float64(y),
+		Width:              PlayerWidth,
+		Height:             PlayerHeight,
+		Speed:              PlayerSpeedPerFrame, // 像素/帧
+		Direction:          DirDown,
+		IsMoving:           false,
+		Character:          charType,
+		Dead:               false,
+		BombCooldownFrames: 0,
+		BombIgnoreGridX:    0,
+		BombIgnoreGridY:    0,
+		BombIgnoreActive:   false,
+		MaxBombs:           1,
+		BombRange:          3,
 		// 插值缓冲区
 		StateBuffer:         make([]StateSnapshot, 0, InterpolationBufferSize),
 		RenderTimestamp:     0,
@@ -85,26 +96,21 @@ func NewPlayer(id int, x, y int, charType CharacterType) *Player {
 		LastNetworkX: float64(x),
 		LastNetworkY: float64(y),
 		LerpProgress: 1.0,
-		LerpSpeed:    PlayerDefaultSpeed,
+		LerpSpeed:    PlayerSpeedPerFrame,
 		IsSimulated:  false,
 	}
 }
 
-// Update 更新玩家状态
-func (p *Player) Update(deltaTime float64, game *Game) {
+// Update 每帧更新玩家状态
+func (p *Player) Update(game *Game) {
 	if p.Dead {
 		return
 	}
 
-	if p.BombCooldownRemaining > 0 {
-		p.BombCooldownRemaining -= deltaTime
-		if p.BombCooldownRemaining < 0 {
-			p.BombCooldownRemaining = 0
-		}
+	// 更新冷却（帧为单位，无需 deltaTime）
+	if p.BombCooldownFrames > 0 {
+		p.BombCooldownFrames--
 	}
-
-	// 远端玩家使用新的插值缓冲系统
-	// 本地玩家由客户端预测系统控制，这里不处理
 }
 
 // ========== 插值缓冲系统（远端玩家）==========
@@ -245,6 +251,7 @@ func (p *Player) SetNetworkPosition(x, y float64) {
 }
 
 // Move 移动玩家（返回是否成功移动）
+// 参数 dx, dy 是像素/帧的移动距离
 func (p *Player) Move(dx, dy float64, game *Game) bool {
 	if p.Dead {
 		return false
@@ -293,13 +300,13 @@ func (p *Player) Move(dx, dy float64, game *Game) bool {
 }
 
 // PlaceBomb 放置炸弹（返回是否成功）
-func (p *Player) PlaceBomb(game *Game) *Bomb {
+func (p *Player) PlaceBomb(game *Game, currentFrame int32) *Bomb {
 	if p.Dead {
 		return nil
 	}
 
-	// 检查冷却时间
-	if p.BombCooldownRemaining > 0 {
+	// 检查冷却时间（帧为单位）
+	if p.BombCooldownFrames > 0 {
 		return nil
 	}
 
@@ -322,17 +329,23 @@ func (p *Player) PlaceBomb(game *Game) *Bomb {
 		}
 	}
 
-	p.BombCooldownRemaining = p.BombCooldownSeconds
+	p.BombCooldownFrames = BombCooldownFrames
 	p.BombIgnoreGridX = gridX
 	p.BombIgnoreGridY = gridY
 	p.BombIgnoreActive = true
-	bomb := NewBomb(gridX, gridY)
+	bomb := NewBomb(gridX, gridY, p.ID, currentFrame)
+	bomb.ExplosionRange = p.BombRange
 	return bomb
 }
 
 // GetGridPosition 获取玩家所在格子
 func (p *Player) GetGridPosition() (int, int) {
 	return int(p.X) / TileSize, int(p.Y) / TileSize
+}
+
+// CanPlaceBomb 检查是否可以放置炸弹
+func (p *Player) CanPlaceBomb() bool {
+	return !p.Dead && p.BombCooldownFrames <= 0
 }
 
 // 辅助函数：获取炸弹的格子坐标列表

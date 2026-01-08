@@ -22,18 +22,19 @@ func NewBombRenderer(bomb *core.Bomb) *BombRenderer {
 // Draw 绘制炸弹
 func (b *BombRenderer) Draw(screen *ebiten.Image) {
 	bomb := b.Bomb
+	// 格子坐标转像素坐标
 	centerOffset := float32(core.TileSize) / 2
-	cx := float32(bomb.X) + centerOffset
-	cy := float32(bomb.Y) + centerOffset
+	cx := float32(bomb.X*core.TileSize) + centerOffset
+	cy := float32(bomb.Y*core.TileSize) + centerOffset
 
-	// 计算闪烁效果
-	elapsedSeconds := core.DefaultTimeToBombSeconds - bomb.TimeToExplode
-	if elapsedSeconds < 0 {
-		elapsedSeconds = 0
+	// 计算闪烁效果（使用帧）
+	elapsedFrames := core.BombFuseFrames - bomb.FramesUntilExplode
+	if elapsedFrames < 0 {
+		elapsedFrames = 0
 	}
 	ratio := 0.0
-	if core.DefaultTimeToBombSeconds > 0 {
-		ratio = elapsedSeconds / core.DefaultTimeToBombSeconds
+	if core.BombFuseFrames > 0 {
+		ratio = float64(elapsedFrames) / float64(core.BombFuseFrames)
 	}
 	if ratio > 1 {
 		ratio = 1
@@ -43,7 +44,7 @@ func (b *BombRenderer) Draw(screen *ebiten.Image) {
 	radius := float32(12)
 
 	// 根据时间闪烁
-	blink := math.Sin(elapsedSeconds * 8) // 快速闪烁
+	blink := math.Sin(float64(elapsedFrames) * 0.1) // 快速闪烁
 	alpha := uint8(200 + 55*blink)
 
 	// 炸弹主体（黑色）
@@ -96,8 +97,8 @@ func NewExplosionRenderer(explosion *core.Explosion) *ExplosionRenderer {
 func (e *ExplosionRenderer) Draw(screen *ebiten.Image) {
 	explosion := e.Explosion
 	ratio := 0.0
-	if explosion.Duration > 0 {
-		ratio = explosion.Elapsed / explosion.Duration
+	if core.BombExplosionFrames > 0 {
+		ratio = float64(core.BombExplosionFrames-explosion.FramesRemaining) / float64(core.BombExplosionFrames)
 	}
 	if ratio > 1 {
 		ratio = 1
@@ -107,8 +108,8 @@ func (e *ExplosionRenderer) Draw(screen *ebiten.Image) {
 	alpha := uint8(255 * (1 - ratio))
 
 	for _, cell := range explosion.Cells {
-		px := float32(cell.GridX * core.TileSize)
-		py := float32(cell.GridY * core.TileSize)
+		px := float32(cell.X * core.TileSize)
+		py := float32(cell.Y * core.TileSize)
 
 		// 爆炸动画：从中心扩散
 		scale := float32(0.3 + 0.7*math.Min(ratio*2, 1.0))

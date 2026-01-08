@@ -18,8 +18,8 @@ type DangerGrid struct {
 
 // BombSnapshot 炸弹快照（用于增量更新）
 type BombSnapshot struct {
-	TimeToExplode float64
-	GridX, GridY  int
+	FramesUntilExplode int // 改为帧
+	GridX, GridY        int
 }
 
 // GridPos 格子坐标
@@ -42,17 +42,25 @@ type AIController struct {
 	dangerGrid DangerGrid
 
 	// 思考频率控制（性能优化）
-	thinkInterval float64 // 思考间隔（秒）
-	thinkTimer    float64 // 思考计时器
-	cachedInput   core.Input
+	thinkIntervalFrames int // 思考间隔（帧）
+	thinkCounter        int // 思考计数器
+	cachedInput         core.Input
 
 	// 门的发现状态
 	doorRevealed bool
 	doorPos      GridPos
 
 	// 随机游走状态（兜底行为）
-	changeDirTicker float64
-	randomInput     core.Input
+	changeDirTickerFrames int // 换方向倒计时（帧）
+	randomInput           core.Input
+
+	// 卡住检测
+	lastPos        GridPos
+	stuckCounter   int
+	stuckThreshold int // 连续 N 帧位置不变视为卡住
+
+	// 逃跑目标缓存（防止抖动）
+	escapeTarget *GridPos
 }
 
 // ===== 构造函数 =====
@@ -74,46 +82,50 @@ func NewAIController(playerID int) *AIController {
 	}
 
 	return &AIController{
-		PlayerID:      playerID,
-		rnd:           rand.New(rand.NewSource(time.Now().UnixNano() + int64(playerID))),
-		thinkInterval: 0.1, // 100ms 思考一次（6 帧）
-		thinkTimer:    0,
+		PlayerID:             playerID,
+		rnd:                  rand.New(rand.NewSource(time.Now().UnixNano() + int64(playerID))),
+		thinkIntervalFrames:  core.AIThinkIntervalFrames, // 6 帧
+		thinkCounter:         0,
 		dangerGrid: DangerGrid{
 			bombSnapshots: make(map[*core.Bomb]BombSnapshot),
 		},
-		changeDirTicker: 0.5 + rand.Float64()*1.0, // 初始 0.5-1.5 秒后换方向
-		randomInput:     randomInput,
+		changeDirTickerFrames: 30 + rand.Intn(60), // 0.5-1.5秒 = 30-90帧
+		randomInput:           randomInput,
+		stuckThreshold:        core.AIStuckThresholdFrames,
 	}
 }
 
 // ===== 主决策入口 =====
 
 // Decide 根据当前游戏状态决定下一帧的输入
-func (c *AIController) Decide(game *core.Game, deltaTime float64) core.Input {
+func (c *AIController) Decide(game *core.Game) core.Input {
 	player := getPlayerByID(game, c.PlayerID)
 	if player == nil || player.Dead {
 		return core.Input{}
 	}
 
-	// 思考频率控制（性能优化）
-	c.thinkTimer -= deltaTime
-
-	// 如果缓存的决策包含放炸弹，强制立即重新思考（防止连续放炸弹或放完发呆）
+	// 如果上一帧放了炸弹，立即强制更新危险图并重新思考
 	if c.cachedInput.Bomb {
-		c.thinkTimer = 0
+		c.dangerGrid.UpdateIfNeeded(game) // 立即刷新
+		c.thinkCounter = 0
+		c.cachedInput = core.Input{} // 清除炸弹指令，防止重复放
 	}
 
-	if c.thinkTimer > 0 {
+	// 思考频率控制（性能优化）
+	c.thinkCounter++
+
+	if c.thinkCounter < c.thinkIntervalFrames {
 		return c.cachedInput // 返回缓存的决策
 	}
 
 	// 重新思考
-	c.thinkTimer = c.thinkInterval
-	newInput := c.thinkLogic(game, player, deltaTime)
+	c.thinkCounter = 0
+	newInput := c.thinkLogic(game, player)
 
-	// 如果新决策是放炸弹，不要缓存太久，确保下一帧能立即反应过来逃跑
+	// 如果决定放炸弹，不缓存移动指令（下一帧专心逃跑）
 	if newInput.Bomb {
-		c.thinkTimer = 0 // 下一帧立即重新思考
+		c.cachedInput = core.Input{Bomb: true}
+		return c.cachedInput
 	}
 
 	c.cachedInput = newInput
@@ -121,9 +133,29 @@ func (c *AIController) Decide(game *core.Game, deltaTime float64) core.Input {
 }
 
 // thinkLogic 核心决策逻辑（行为树）
-func (c *AIController) thinkLogic(game *core.Game, player *core.Player, deltaTime float64) core.Input {
+func (c *AIController) thinkLogic(game *core.Game, player *core.Player) core.Input {
 	// 更新危险热力图
 	c.dangerGrid.UpdateIfNeeded(game)
+
+	// 卡住检测
+	currentPos := GridPos{
+		X: int(player.X) / core.TileSize,
+		Y: int(player.Y) / core.TileSize,
+	}
+
+	if currentPos == c.lastPos {
+		c.stuckCounter++
+	} else {
+		c.stuckCounter = 0
+		c.lastPos = currentPos
+	}
+
+	// 如果卡住太久，强制随机移动脱困
+	if c.stuckCounter > c.stuckThreshold {
+		c.stuckCounter = 0
+		c.pickNewRandomDirection()
+		return c.randomInput
+	}
 
 	// 更新门的发现状态
 	c.updateDoorStatus(game)
@@ -138,8 +170,11 @@ func (c *AIController) thinkLogic(game *core.Game, player *core.Player, deltaTim
 		return c.escape(player, game)
 	}
 
+	// 脱离危险后，清除逃跑目标缓存
+	c.escapeTarget = nil
+
 	// 2. 寻找门：如果门已被发现且幸存者只剩自己，前往门
-	if c.doorRevealed && c.shouldGoToDoor(game, player) {
+	if c.doorRevealed && c.shouldGoToDoor(game) {
 		return c.goToDoor(player, game)
 	}
 
@@ -162,7 +197,7 @@ func (c *AIController) thinkLogic(game *core.Game, player *core.Player, deltaTim
 	}
 
 	// 5. 兜底：随机游走
-	return c.randomWalk(deltaTime)
+	return c.randomWalk()
 }
 
 // ===== 危险热力图更新 =====
@@ -176,16 +211,22 @@ func (dg *DangerGrid) UpdateIfNeeded(game *core.Game) {
 		}
 	}
 
-	// 重新计算所有炸弹的危险区
+	// 1. 标记所有炸弹的危险区（即将爆炸）
 	currentBombs := make(map[*core.Bomb]bool)
 	for _, bomb := range game.Bombs {
 		currentBombs[bomb] = true
 		dg.addBombDanger(bomb, game.Map)
+		gridX, gridY := bomb.GetGridPosition()
 		dg.bombSnapshots[bomb] = BombSnapshot{
-			TimeToExplode: bomb.TimeToExplode,
-			GridX:         bomb.X / core.TileSize,
-			GridY:         bomb.Y / core.TileSize,
+			FramesUntilExplode: bomb.FramesUntilExplode,
+			GridX:              gridX,
+			GridY:              gridY,
 		}
+	}
+
+	// 2. 标记所有正在爆炸的火焰区域（致命！）
+	for _, explosion := range game.Explosions {
+		dg.addExplosionDanger(explosion)
 	}
 
 	// 清理已爆炸的炸弹
@@ -196,19 +237,26 @@ func (dg *DangerGrid) UpdateIfNeeded(game *core.Game) {
 	}
 }
 
-// addBombDanger 添加炸弹的危险区
+// addBombDanger 添加炸弹的危险区（改进的分段危险值计算）
 func (dg *DangerGrid) addBombDanger(bomb *core.Bomb, gameMap *core.GameMap) {
 	gridX, gridY := bomb.GetGridPosition()
 
-	// 危险度 = 1.0 / (剩余时间 + 0.5)
-	// 即将爆炸的炸弹危险度更高
-	dangerValue := 1.0 / (bomb.TimeToExplode + 0.5)
-	if dangerValue > 1.0 {
-		dangerValue = 1.0
+	// 分段危险值（基于帧）：
+	// - 剩余 > 90帧(1.5s): 低危 (0.2)
+	// - 剩余 60-90帧(1.0-1.5s): 中危 (0.5)
+	// - 剩余 < 60帧(1.0s): 高危 (0.9)
+	var dangerValue float64
+	switch {
+	case bomb.FramesUntilExplode > 90:
+		dangerValue = 0.2
+	case bomb.FramesUntilExplode > 60:
+		dangerValue = 0.5
+	default:
+		dangerValue = 0.9
 	}
 
 	// 计算爆炸范围
-	explosion := core.NewExplosion(gridX, gridY, bomb.ExplosionRange)
+	explosion := core.NewExplosion(gridX, gridY, bomb.ExplosionRange, 0, bomb.OwnerID)
 	cells := explosion.CalculateExplosionCells(gameMap)
 
 	// 标记危险格子
@@ -223,15 +271,22 @@ func (dg *DangerGrid) addBombDanger(bomb *core.Bomb, gameMap *core.GameMap) {
 	}
 }
 
+// addExplosionDanger 添加爆炸火焰的危险区（危险值 = 1.0，绝对致命）
+func (dg *DangerGrid) addExplosionDanger(explosion *core.Explosion) {
+	for _, cell := range explosion.Cells {
+		if cell.Y >= 0 && cell.Y < core.MapHeight &&
+			cell.X >= 0 && cell.X < core.MapWidth {
+			dg.Cells[cell.Y][cell.X] = 1.0 // 火焰 = 必死
+		}
+	}
+}
+
 // ===== 生存逻辑 =====
 
 // isInDanger 检查玩家是否处于危险中
 func (c *AIController) isInDanger(player *core.Player) bool {
-	// 修正：使用玩家中心点来判断是否在危险中，而不是左上角
-	// 这与游戏核心的碰撞检测逻辑一致
-	centerX := int(player.X + float64(player.Width)/2)
-	centerY := int(player.Y + float64(player.Height)/2)
-	gridX, gridY := core.PlayerXYToGrid(centerX, centerY)
+	// 使用左上角坐标计算格子位置（与其他函数保持一致）
+	gridX, gridY := core.PlayerXYToGrid(int(player.X), int(player.Y))
 
 	// 降低危险阈值，更敏感地躲避炸弹
 	if gridX >= 0 && gridX < core.MapWidth && gridY >= 0 && gridY < core.MapHeight {
@@ -244,12 +299,31 @@ func (c *AIController) isInDanger(player *core.Player) bool {
 func (c *AIController) escape(player *core.Player, game *core.Game) core.Input {
 	playerGridX, playerGridY := core.PlayerXYToGrid(int(player.X), int(player.Y))
 
+	// 检查缓存的逃跑目标是否仍然有效
+	if c.escapeTarget != nil {
+		// 验证目标仍然安全
+		if c.escapeTarget.X >= 0 && c.escapeTarget.X < core.MapWidth &&
+			c.escapeTarget.Y >= 0 && c.escapeTarget.Y < core.MapHeight &&
+			c.dangerGrid.Cells[c.escapeTarget.Y][c.escapeTarget.X] < 0.01 {
+			// 目标仍然安全，继续往那里跑
+			nextStep, found := c.getNextStep(player, *c.escapeTarget, game)
+			if found {
+				return c.moveToCell(player, nextStep)
+			}
+		}
+		// 目标无效了，清除缓存
+		c.escapeTarget = nil
+	}
+
 	// BFS 搜索最近的安全格子
 	safeGrid := c.findNearestSafeCell(playerGridX, playerGridY, game)
 	if safeGrid == nil {
 		// 没有安全格子，随机移动（听天由命）
-		return c.randomWalk(0)
+		return c.randomWalk()
 	}
+
+	// 缓存逃跑目标
+	c.escapeTarget = safeGrid
 
 	// 使用 BFS 寻路移动到安全格子
 	nextStep, found := c.getNextStep(player, *safeGrid, game)
@@ -258,7 +332,7 @@ func (c *AIController) escape(player *core.Player, game *core.Game) core.Input {
 	}
 
 	// 找不到路径，随机移动
-	return c.randomWalk(0)
+	return c.randomWalk()
 }
 
 // findNearestSafeCell BFS 搜索最近的安全格子
@@ -301,7 +375,13 @@ func (c *AIController) findNearestSafeCell(startX, startY int, game *core.Game) 
 			nx, ny := current.pos.X+dir.dx, current.pos.Y+dir.dy
 			if nx >= 0 && nx < core.MapWidth && ny >= 0 && ny < core.MapHeight {
 				tile := game.Map.GetTile(nx, ny)
-				if tile != core.TileWall && tile != core.TileBrick {
+
+				// 关键修复：路径本身也不能太危险
+				pathDanger := c.dangerGrid.Cells[ny][nx]
+
+				// 允许穿越轻微危险区（< 0.3），但禁止穿越高危区
+				// 这样 AI 可以在炸弹快爆炸前"擦边"逃跑
+				if tile != core.TileWall && tile != core.TileBrick && pathDanger < 0.3 {
 					queue = append(queue, node{
 						pos:   GridPos{X: nx, Y: ny},
 						depth: current.depth + 1,
@@ -357,12 +437,8 @@ func (c *AIController) getNextStep(player *core.Player, target GridPos, game *co
 			break
 		}
 
-		// 搜索 4 个方向
+		// 搜索 4 个方向（固定顺序，避免抖动）
 		dirs := []GridPos{{0, -1}, {0, 1}, {-1, 0}, {1, 0}}
-		// 随机化方向顺序，避免 AI 走得太死板
-		rand.Shuffle(len(dirs), func(i, j int) {
-			dirs[i], dirs[j] = dirs[j], dirs[i]
-		})
 
 		for _, d := range dirs {
 			nextPos := GridPos{X: curr.Pos.X + d.X, Y: curr.Pos.Y + d.Y}
@@ -394,9 +470,9 @@ func (c *AIController) getNextStep(player *core.Player, target GridPos, game *co
 				continue
 			}
 
-			// 危险检查：如果不是逃命模式，且该格子极其危险，视为障碍物
-			// 注意：这里需要权衡，如果必须穿过火海去杀人，可能需要放宽
-			if c.dangerGrid.Cells[nextPos.Y][nextPos.X] > 0.8 {
+			// 危险检查：逃跑时用更低的阈值，避免穿越危险区
+			// 与 findNearestSafeCell 保持一致，使用 0.3 作为阈值
+			if c.dangerGrid.Cells[nextPos.Y][nextPos.X] > 0.3 {
 				continue
 			}
 
@@ -618,7 +694,7 @@ func (c *AIController) updateDoorStatus(game *core.Game) {
 }
 
 // shouldGoToDoor 判断是否应该前往门
-func (c *AIController) shouldGoToDoor(game *core.Game, player *core.Player) bool {
+func (c *AIController) shouldGoToDoor(game *core.Game) bool {
 	// 统计存活玩家数
 	aliveCount := 0
 	for _, p := range game.Players {
@@ -770,7 +846,7 @@ func (c *AIController) moveToTarget(player *core.Player, target *GridPos, game *
 	}
 
 	// 找不到路径，随机移动
-	return c.randomWalk(0)
+	return c.randomWalk()
 }
 
 // isAtTarget 检查是否到达目标
@@ -786,10 +862,10 @@ func (c *AIController) isAtTarget(player *core.Player, target *GridPos) bool {
 // ===== 随机游走（兜底行为） =====
 
 // randomWalk 随机游走
-func (c *AIController) randomWalk(deltaTime float64) core.Input {
-	c.changeDirTicker -= deltaTime
-	if c.changeDirTicker <= 0 {
-		c.changeDirTicker = 0.5 + c.rnd.Float64()*1.0 // 0.5 ~ 1.5 秒改变一次
+func (c *AIController) randomWalk() core.Input {
+	c.changeDirTickerFrames--
+	if c.changeDirTickerFrames <= 0 {
+		c.changeDirTickerFrames = 30 + c.rnd.Intn(60) // 0.5 ~ 1.5 秒改变一次 (30-90帧)
 		c.pickNewRandomDirection()
 	}
 	return c.randomInput
