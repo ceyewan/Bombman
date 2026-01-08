@@ -395,53 +395,76 @@ func (c *AIController) getNextStep(player *core.Player, target GridPos, game *co
 	return curr.Pos, true
 }
 
-// moveToCell 生成从当前像素坐标移动到相邻格子的 Input
+// moveToCell [重构]：先对齐轴线，再移动
 func (c *AIController) moveToCell(player *core.Player, targetGrid GridPos) core.Input {
 	input := core.Input{}
 
 	// 目标中心像素坐标
 	targetPixelX := float64(targetGrid.X * core.TileSize)
 	targetPixelY := float64(targetGrid.Y * core.TileSize)
+	currentGridX, currentGridY := core.PlayerXYToGrid(int(player.X), int(player.Y))
 
-	// 容差，避免在像素级别抖动
-	const tolerance = 2.0
+	// 容差：越小越精准，建议 2.0 或更小以确保顺利进洞
+	const alignTolerance = 2.0
 
 	dx := targetPixelX - player.X
 	dy := targetPixelY - player.Y
 
-	// 优先处理轴对齐：如果我想横向移动，但我纵向没对齐，先纵向对齐
-	// 这里简化处理，直接向目标方向移动
+	// 策略：如果要跨越格子，必须先确保垂直轴对齐
 
-	if math.Abs(dx) > tolerance {
+	// 情况 1: 水平移动 (目标在左右)
+	if targetGrid.X != currentGridX {
+		// 必须先对齐 Y 轴
+		if math.Abs(dy) > alignTolerance {
+			if dy > 0 {
+				input.Down = true
+			} else {
+				input.Up = true
+			}
+			return input // ⛔ 关键：Y 轴未对齐前，禁止水平移动
+		}
+		// Y 轴已对齐，允许水平移动
+		if dx > 0 {
+			input.Right = true
+		} else {
+			input.Left = true
+		}
+		return input
+	}
+
+	// 情况 2: 垂直移动 (目标在上下)
+	if targetGrid.Y != currentGridY {
+		// 必须先对齐 X 轴
+		if math.Abs(dx) > alignTolerance {
+			if dx > 0 {
+				input.Right = true
+			} else {
+				input.Left = true
+			}
+			return input // ⛔ 关键：X 轴未对齐前，禁止垂直移动
+		}
+		// X 轴已对齐，允许垂直移动
+		if dy > 0 {
+			input.Down = true
+		} else {
+			input.Up = true
+		}
+		return input
+	}
+
+	// 情况 3: 格子内微调 (走到中心)
+	if math.Abs(dx) > alignTolerance {
 		if dx > 0 {
 			input.Right = true
 		} else {
 			input.Left = true
 		}
 	}
-
-	// 如果 X 轴还没对齐，通常不建议同时移动 Y，除非游戏支持斜向移动
-	// 为了走得更直，可以加一个判断：只有 X 对齐了才走 Y，或者由物理引擎处理滑墙
-	if math.Abs(dy) > tolerance {
+	if math.Abs(dy) > alignTolerance {
 		if dy > 0 {
 			input.Down = true
 		} else {
 			input.Up = true
-		}
-	}
-
-	// 简单的防卡墙逻辑：如果同时有 X 和 Y 的位移需求，
-	// 且周围有障碍，优先修正偏差较小的轴，或者只移动主方向
-	if input.Up || input.Down {
-		if input.Left || input.Right {
-			// 简单的去抖动：优先走距离更远的方向
-			if math.Abs(dx) > math.Abs(dy) {
-				input.Up = false
-				input.Down = false
-			} else {
-				input.Left = false
-				input.Right = false
-			}
 		}
 	}
 
@@ -621,37 +644,83 @@ func (c *AIController) findAttackTarget(player *core.Player, game *core.Game) *G
 	return c.findNearestBrick(player, game)
 }
 
-// findNearestBrick 寻找最近的砖块周围的可到达位置
+// findNearestBrick [重构]：寻找最近的"最佳投弹点"
+// 逻辑：BFS 遍历可达的空地，检查该空地是否能炸到砖块
 func (c *AIController) findNearestBrick(player *core.Player, game *core.Game) *GridPos {
-	playerGridX, playerGridY := core.PlayerXYToGrid(int(player.X), int(player.Y))
+	startGridX, startGridY := core.PlayerXYToGrid(int(player.X), int(player.Y))
+	startNode := GridPos{X: startGridX, Y: startGridY}
 
-	closestPos := (*GridPos)(nil)
-	minDist := math.MaxFloat64
+	// 1. 检查原地是否就是最佳攻击点
+	if c.hasBrickInRange(startNode, game) && c.canPlaceBombSafely(player, game) {
+		return &startNode
+	}
 
-	for y := 0; y < core.MapHeight; y++ {
-		for x := 0; x < core.MapWidth; x++ {
-			if game.Map.GetTile(x, y) == core.TileBrick {
-				// 检查砖块周围 4 个方向是否有可到达的位置
-				dirs := []struct{ dx, dy int }{{0, -1}, {0, 1}, {-1, 0}, {1, 0}}
-				for _, dir := range dirs {
-					nx, ny := x+dir.dx, y+dir.dy
-					if nx >= 0 && nx < core.MapWidth && ny >= 0 && ny < core.MapHeight {
-						tile := game.Map.GetTile(nx, ny)
-						if tile == core.TileEmpty || tile == core.TileDoor {
-							// 这是一个可以到达砖块的位置
-							dist := manhattanDistance(playerGridX, playerGridY, nx, ny)
-							if dist < minDist {
-								minDist = dist
-								closestPos = &GridPos{X: nx, Y: ny}
-							}
-						}
-					}
-				}
+	// 2. BFS 泛洪搜索
+	queue := []GridPos{startNode}
+	visited := make(map[GridPos]bool)
+	visited[startNode] = true
+
+	// 限制搜索步数，防止地图过大导致卡顿
+	maxSteps := 100
+	steps := 0
+
+	for len(queue) > 0 {
+		if steps > maxSteps {
+			break
+		}
+
+		curr := queue[0]
+		queue = queue[1:]
+		steps++
+
+		// 检查：如果站在这里放炸弹，能炸到砖块吗？
+		// 且该位置安全（不是火海，且放了炸弹能跑掉）
+		if c.hasBrickInRange(curr, game) {
+			if c.dangerGrid.Cells[curr.Y][curr.X] < 0.1 && c.canPlaceBombSafelyAt(curr, game) {
+				return &curr // 找到了最近的可达攻击位
 			}
+		}
+
+		// 拓展邻居
+		dirs := []GridPos{{0, -1}, {0, 1}, {-1, 0}, {1, 0}}
+		// 随机打乱顺序，增加行为自然度
+		rand.Shuffle(len(dirs), func(i, j int) {
+			dirs[i], dirs[j] = dirs[j], dirs[i]
+		})
+
+		for _, d := range dirs {
+			next := GridPos{X: curr.X + d.X, Y: curr.Y + d.Y}
+
+			// 越界检查
+			if next.X < 0 || next.X >= core.MapWidth || next.Y < 0 || next.Y >= core.MapHeight {
+				continue
+			}
+			if visited[next] {
+				continue
+			}
+
+			// 障碍物检查：不能穿墙，也不能穿砖
+			tile := game.Map.GetTile(next.X, next.Y)
+			if tile == core.TileWall || tile == core.TileBrick {
+				continue
+			}
+
+			// 炸弹阻挡检查：不能穿过现有的炸弹
+			if c.isBlockedByBomb(next, game) {
+				continue
+			}
+
+			// 危险区域回避：不要为了找砖块冲进火海
+			if c.dangerGrid.Cells[next.Y][next.X] > 0.5 {
+				continue
+			}
+
+			visited[next] = true
+			queue = append(queue, next)
 		}
 	}
 
-	return closestPos
+	return nil
 }
 
 // ===== 移动逻辑 =====
@@ -718,6 +787,132 @@ func (c *AIController) pickNewRandomDirection() {
 	case 4:
 		// 停止
 	}
+}
+
+// ===== 辅助函数 =====
+
+// hasBrickInRange 检查在 pos 位置放置炸弹，能否炸毁任何砖块（范围 3 格）
+func (c *AIController) hasBrickInRange(pos GridPos, game *core.Game) bool {
+	bombRange := 3
+	dirs := []GridPos{{0, -1}, {0, 1}, {-1, 0}, {1, 0}}
+
+	for _, d := range dirs {
+		for i := 1; i <= bombRange; i++ {
+			checkX := pos.X + d.X*i
+			checkY := pos.Y + d.Y*i
+
+			if checkX < 0 || checkX >= core.MapWidth || checkY < 0 || checkY >= core.MapHeight {
+				break
+			}
+
+			tile := game.Map.GetTile(checkX, checkY)
+			if tile == core.TileWall {
+				break // 墙壁阻挡爆炸
+			}
+			if tile == core.TileBrick {
+				return true // 炸到砖块
+			}
+		}
+	}
+	return false
+}
+
+// isBlockedByBomb 检查位置是否被炸弹阻挡
+func (c *AIController) isBlockedByBomb(pos GridPos, game *core.Game) bool {
+	for _, b := range game.Bombs {
+		bx, by := b.GetGridPosition()
+		if bx == pos.X && by == pos.Y {
+			return true
+		}
+	}
+	return false
+}
+
+// canPlaceBombSafelyAt 检查在指定位置是否可以安全放置炸弹
+func (c *AIController) canPlaceBombSafelyAt(pos GridPos, game *core.Game) bool {
+	// 1. 检查位置是否已有炸弹
+	if c.isBlockedByBomb(pos, game) {
+		return false
+	}
+
+	// 2. 模拟爆炸范围
+	simulatedRange := 2
+	dangerMap := make(map[GridPos]bool)
+
+	// 简单计算十字范围
+	dangerMap[GridPos{pos.X, pos.Y}] = true
+	dirs := []GridPos{{0, 1}, {0, -1}, {1, 0}, {-1, 0}}
+	for _, d := range dirs {
+		for i := 1; i <= simulatedRange; i++ {
+			nx, ny := pos.X+d.X*i, pos.Y+d.Y*i
+			if nx < 0 || nx >= core.MapWidth || ny < 0 || ny >= core.MapHeight {
+				break
+			}
+			tile := game.Map.GetTile(nx, ny)
+			if tile == core.TileWall {
+				break
+			}
+
+			dangerMap[GridPos{nx, ny}] = true
+
+			if tile == core.TileBrick {
+				break
+			}
+		}
+	}
+
+	// 3. 使用 BFS 寻找最近的安全点（不在 dangerMap 中的点）
+	type NodeState struct {
+		Pos   GridPos
+		Depth int
+	}
+	qState := []NodeState{{GridPos{pos.X, pos.Y}, 0}}
+	visited := make(map[GridPos]bool)
+	visited[GridPos{pos.X, pos.Y}] = true
+
+	foundSafeSpot := false
+	maxSearchDepth := 10
+
+	for len(qState) > 0 {
+		curr := qState[0]
+		qState = qState[1:]
+
+		if !dangerMap[curr.Pos] && c.dangerGrid.Cells[curr.Pos.Y][curr.Pos.X] < 0.1 {
+			foundSafeSpot = true
+			break
+		}
+
+		if curr.Depth >= maxSearchDepth {
+			continue
+		}
+
+		for _, d := range dirs {
+			nx, ny := curr.Pos.X+d.X, curr.Pos.Y+d.Y
+			nextPos := GridPos{nx, ny}
+
+			if nx < 0 || nx >= core.MapWidth || ny < 0 || ny >= core.MapHeight {
+				continue
+			}
+			if visited[nextPos] {
+				continue
+			}
+
+			tile := game.Map.GetTile(nx, ny)
+			if tile == core.TileWall || tile == core.TileBrick {
+				continue
+			}
+
+			blockedByBomb := c.isBlockedByBomb(nextPos, game)
+			if blockedByBomb {
+				continue
+			}
+
+			visited[nextPos] = true
+			qState = append(qState, NodeState{nextPos, curr.Depth + 1})
+		}
+	}
+
+	return foundSafeSpot
 }
 
 // ===== 工具函数 =====
