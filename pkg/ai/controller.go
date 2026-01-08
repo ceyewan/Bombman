@@ -59,6 +59,20 @@ type AIController struct {
 
 // NewAIController 创建新的 AI 控制器
 func NewAIController(playerID int) *AIController {
+	// 初始化随机方向，避免第一次随机游走时选择停止
+	randomInput := core.Input{}
+	choice := rand.Intn(4) // 0-3，不包含4（停止）
+	switch choice {
+	case 0:
+		randomInput.Up = true
+	case 1:
+		randomInput.Down = true
+	case 2:
+		randomInput.Left = true
+	case 3:
+		randomInput.Right = true
+	}
+
 	return &AIController{
 		PlayerID:      playerID,
 		rnd:           rand.New(rand.NewSource(time.Now().UnixNano() + int64(playerID))),
@@ -67,7 +81,8 @@ func NewAIController(playerID int) *AIController {
 		dangerGrid: DangerGrid{
 			bombSnapshots: make(map[*core.Bomb]BombSnapshot),
 		},
-		changeDirTicker: 0,
+		changeDirTicker: 0.5 + rand.Float64()*1.0, // 初始 0.5-1.5 秒后换方向
+		randomInput:     randomInput,
 	}
 }
 
@@ -606,26 +621,37 @@ func (c *AIController) findAttackTarget(player *core.Player, game *core.Game) *G
 	return c.findNearestBrick(player, game)
 }
 
-// findNearestBrick 寻找最近的砖块
+// findNearestBrick 寻找最近的砖块周围的可到达位置
 func (c *AIController) findNearestBrick(player *core.Player, game *core.Game) *GridPos {
 	playerGridX, playerGridY := core.PlayerXYToGrid(int(player.X), int(player.Y))
 
-	closestBrick := (*GridPos)(nil)
+	closestPos := (*GridPos)(nil)
 	minDist := math.MaxFloat64
 
 	for y := 0; y < core.MapHeight; y++ {
 		for x := 0; x < core.MapWidth; x++ {
 			if game.Map.GetTile(x, y) == core.TileBrick {
-				dist := manhattanDistance(playerGridX, playerGridY, x, y)
-				if dist < minDist {
-					minDist = dist
-					closestBrick = &GridPos{X: x, Y: y}
+				// 检查砖块周围 4 个方向是否有可到达的位置
+				dirs := []struct{ dx, dy int }{{0, -1}, {0, 1}, {-1, 0}, {1, 0}}
+				for _, dir := range dirs {
+					nx, ny := x+dir.dx, y+dir.dy
+					if nx >= 0 && nx < core.MapWidth && ny >= 0 && ny < core.MapHeight {
+						tile := game.Map.GetTile(nx, ny)
+						if tile == core.TileEmpty || tile == core.TileDoor {
+							// 这是一个可以到达砖块的位置
+							dist := manhattanDistance(playerGridX, playerGridY, nx, ny)
+							if dist < minDist {
+								minDist = dist
+								closestPos = &GridPos{X: nx, Y: ny}
+							}
+						}
+					}
 				}
 			}
 		}
 	}
 
-	return closestBrick
+	return closestPos
 }
 
 // ===== 移动逻辑 =====
