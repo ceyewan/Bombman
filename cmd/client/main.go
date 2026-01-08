@@ -125,10 +125,10 @@ func createLocalGame(character core.CharacterType, controlScheme client.ControlS
 	player := client.NewPlayer(game, 1, x, y, character, false)
 	game.AddPlayer(player)
 
-	// 添加 AI 玩家（可选）
-	// addAIPlayers(game, 3)
+// 添加 AI 玩家（可选）
+addAIPlayers(game, 3)
 
-	return game
+return game
 }
 
 // addAIPlayers 添加 AI 玩家（用于测试）

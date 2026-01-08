@@ -27,31 +27,35 @@ const (
 
 // GameServer 游戏服务器
 type GameServer struct {
-	room *Room
+room *Room
 
-	// 网络
-	listener ServerListener
-	addr     string
-	proto    string
+// 配置
+enableAI bool
 
-	// 控制
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	shutdown chan struct{}
+// 网络
+listener ServerListener
+addr     string
+proto    string
+
+// 控制
+ctx      context.Context
+cancel   context.CancelFunc
+wg       sync.WaitGroup
+shutdown chan struct{}
 }
 
 // NewGameServer 创建新的游戏服务器
-func NewGameServer(addr, proto string) *GameServer {
-	ctx, cancel := context.WithCancel(context.Background())
+func NewGameServer(addr, proto string, enableAI bool) *GameServer {
+ctx, cancel := context.WithCancel(context.Background())
 
-	return &GameServer{
-		addr:     addr,                // 监听地址
-		proto:    proto,               // 监听协议
-		ctx:      ctx,                 // 上下文
-		cancel:   cancel,              // 取消函数
-		shutdown: make(chan struct{}), // 关闭信号
-	}
+return &GameServer{
+addr:     addr,                // 监听地址
+proto:    proto,               // 监听协议
+enableAI: enableAI,            // 是否启用 AI
+ctx:      ctx,                 // 上下文
+cancel:   cancel,              // 取消函数
+shutdown: make(chan struct{}), // 关闭信号
+}
 }
 
 // Start 启动服务器
@@ -65,13 +69,13 @@ func (s *GameServer) Start() error {
 	}
 	s.listener = listener
 
-	log.Printf("服务器监听中: %s", s.addr)
+log.Printf("服务器监听中: %s", s.addr)
 
-	s.room = NewRoom(s.ctx)
+s.room = NewRoom(s.ctx, s.enableAI)
 
-	// 启动房间循环
-	s.wg.Add(1)
-	go s.room.Run(&s.wg)
+// 启动房间循环
+s.wg.Add(1)
+go s.room.Run(&s.wg)
 
 	// 启动连接接受循环
 	s.wg.Add(1)

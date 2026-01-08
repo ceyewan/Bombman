@@ -1,11 +1,12 @@
 package client
 
 import (
-	"image/color"
+"image/color"
 
-	"github.com/hajimehoshi/ebiten/v2"
-	"github.com/hajimehoshi/ebiten/v2/vector"
-	"bomberman/pkg/core"
+"github.com/hajimehoshi/ebiten/v2"
+"github.com/hajimehoshi/ebiten/v2/vector"
+"bomberman/pkg/ai"
+"bomberman/pkg/core"
 )
 
 // PlayerRenderer 玩家渲染器
@@ -18,37 +19,50 @@ type PlayerRenderer struct {
 
 // Player 玩家（包含渲染和输入）
 type Player struct {
-	corePlayer  *core.Player
-	renderer    *PlayerRenderer
+corePlayer   *core.Player
+renderer     *PlayerRenderer
+aiController *ai.AIController
 }
 
 // NewPlayer 创建新玩家
 func NewPlayer(g *Game, id int, x, y int, charType core.CharacterType, isSimulated bool) *Player {
-	corePlayer := core.NewPlayer(id, x, y, charType)
-	corePlayer.IsSimulated = isSimulated
+corePlayer := core.NewPlayer(id, x, y, charType)
+corePlayer.IsSimulated = isSimulated
 
-	renderer := &PlayerRenderer{
-		corePlayer: corePlayer,
-		CharInfo:   GetCharacterInfo(charType),
-		AnimFrame:  0,
-		AnimTime:   0,
-	}
+renderer := &PlayerRenderer{
+corePlayer: corePlayer,
+CharInfo:   GetCharacterInfo(charType),
+AnimFrame:  0,
+AnimTime:   0,
+}
 
-	return &Player{
-		corePlayer: corePlayer,
-		renderer:   renderer,
-	}
+p := &Player{
+corePlayer: corePlayer,
+renderer:   renderer,
+}
+
+if isSimulated {
+p.aiController = ai.NewAIController(id)
+}
+
+return p
 }
 
 // Update 更新玩家状态（输入处理）
 func (p *Player) Update(deltaTime float64, controlScheme ControlScheme, coreGame *core.Game) {
-	// 处理输入
-	if !p.corePlayer.IsSimulated && !p.corePlayer.Dead {
-		p.handleInput(deltaTime, controlScheme, coreGame)
-	}
+// 处理输入
+if !p.corePlayer.Dead {
+if !p.corePlayer.IsSimulated {
+p.handleInput(deltaTime, controlScheme, coreGame)
+} else if p.aiController != nil {
+// AI 控制
+input := p.aiController.Decide(coreGame, deltaTime)
+core.ApplyInput(coreGame, p.corePlayer.ID, input, deltaTime)
+}
+}
 
-	// 更新动画
-	p.renderer.updateAnimation(deltaTime)
+// 更新动画
+p.renderer.updateAnimation(deltaTime)
 }
 
 // handleInput 处理键盘输入

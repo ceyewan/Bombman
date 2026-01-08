@@ -11,13 +11,14 @@ import (
 )
 
 func main() {
-	// 命令行参数
-	address := flag.String("addr", ":8080", "服务器监听地址")
-	proto := flag.String("proto", "tcp", "服务器监听协议: tcp 或 kcp")
-	flag.Parse()
+// 命令行参数
+address := flag.String("addr", ":8080", "服务器监听地址")
+proto := flag.String("proto", "tcp", "服务器监听协议: tcp 或 kcp")
+enableAI := flag.Bool("enable-ai", false, "是否启用 AI 玩家")
+flag.Parse()
 
-	// 创建服务器
-	gameServer := server.NewGameServer(*address, *proto)
+// 创建服务器
+gameServer := server.NewGameServer(*address, *proto, *enableAI)
 
 	// 启动服务器（在新的 goroutine 中）
 	go func() {
