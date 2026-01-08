@@ -418,24 +418,29 @@ func (r *Room) broadcastGameOver(winnerID int32) {
 }
 
 func (r *Room) checkGameOver() (bool, int32) {
+	// 使用核心逻辑的 IsGameOver() 判定
+	// 这包含了新的"进门"胜利条件
+	if !r.game.IsGameOver() {
+		return false, -1
+	}
+
+	// 游戏结束，找出获胜者
 	total, alive, winnerID := r.countPlayersAlive()
 	if total == 0 {
-		return false, -1
+		return true, -1
 	}
 
-	// 单人训练：只有死亡才结束
-	if total == 1 {
-		if alive == 0 {
-			return true, -1
-		}
-		return false, -1
-	}
-
-	// 多人对战：只剩 0/1 人时结束
-	if alive <= 1 {
+	// 如果只剩1人且该人站在门上，则该人获胜
+	if alive == 1 {
 		return true, winnerID
 	}
 
+	// 所有人都死了
+	if alive == 0 {
+		return true, -1
+	}
+
+	// 其他情况不应该发生（IsGameOver返回true但多人存活）
 	return false, -1
 }
 

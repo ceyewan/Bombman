@@ -1,19 +1,26 @@
 package core
 
+import (
+	"math/rand"
+	"time"
+)
+
 // TileType 地图块类型
 type TileType int
 
 const (
 	TileEmpty TileType = iota
-	TileWall // 不可破坏的墙
-	TileBrick // 可破坏的砖块
+	TileWall           // 不可破坏的墙
+	TileBrick          // 可破坏的砖块
+	TileDoor           // 门 (隐藏在砖块下，炸开后出现)
 )
 
 // GameMap 游戏地图（核心逻辑，不包含渲染）
 type GameMap struct {
-	Tiles [][]TileType
-	Width  int
-	Height int
+	Tiles         [][]TileType
+	Width         int
+	Height        int
+	HiddenDoorPos struct{ X, Y int } // 隐藏门的坐标
 }
 
 // NewGameMap 创建新地图
@@ -32,6 +39,8 @@ func NewGameMap() *GameMap {
 
 // loadMapTemplate 加载地图模板 - 有趣的对称设计
 func (m *GameMap) loadMapTemplate() {
+	rand.Seed(time.Now().UnixNano())
+
 	// 地图模板：W=墙壁, B=砖块, .=空地
 	// 设计一个更开阔的地图，边缘也可以活动 (20x15)
 	// 每行必须正好20个字符
@@ -74,6 +83,21 @@ func (m *GameMap) loadMapTemplate() {
 	m.Tiles[1][3] = TileEmpty
 	m.Tiles[2][1] = TileEmpty
 	m.Tiles[3][1] = TileEmpty
+
+// 随机选择一个砖块放置隐藏门
+brickPositions := []struct{ X, Y int }{}
+for y := 0; y < MapHeight; y++ {
+for x := 0; x < MapWidth; x++ {
+if m.Tiles[y][x] == TileBrick {
+brickPositions = append(brickPositions, struct{ X, Y int }{X: x, Y: y})
+}
+}
+}
+
+if len(brickPositions) > 0 {
+idx := rand.Intn(len(brickPositions))
+m.HiddenDoorPos = brickPositions[idx]
+}
 }
 
 // GetTile 获取指定位置的地图块

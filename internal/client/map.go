@@ -34,6 +34,8 @@ func (m *MapRenderer) Draw(screen *ebiten.Image) {
 				c = color.RGBA{80, 80, 80, 255} // 灰色墙
 			case core.TileBrick:
 				c = color.RGBA{205, 133, 63, 255} // 砖块棕色
+			case core.TileDoor:
+				c = color.RGBA{255, 215, 0, 255} // 金色门
 			}
 
 			// 绘制方块
@@ -59,6 +61,21 @@ func (m *MapRenderer) Draw(screen *ebiten.Image) {
 					2, color.RGBA{60, 60, 60, 255}, false)
 				vector.StrokeLine(screen, px+5, py+core.TileSize/2, px+core.TileSize-5, py+core.TileSize/2,
 					2, color.RGBA{60, 60, 60, 255}, false)
+			}
+
+			// 为门添加特殊效果
+			if tile == core.TileDoor {
+				// 绘制门的梯子图案（模拟 NES 风格）
+				for i := 0; i < 4; i++ {
+					lineY := py + float32(i*8+6)
+					vector.StrokeLine(screen, px+8, lineY, px+core.TileSize-8, lineY, 2,
+						color.RGBA{218, 165, 32, 255}, false)
+				}
+				// 垂直支柱
+				vector.StrokeLine(screen, px+10, py+6, px+10, py+core.TileSize-6, 2,
+					color.RGBA{184, 134, 11, 255}, false)
+				vector.StrokeLine(screen, px+core.TileSize-10, py+6, px+core.TileSize-10, py+core.TileSize-6, 2,
+					color.RGBA{184, 134, 11, 255}, false)
 			}
 		}
 	}

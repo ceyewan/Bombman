@@ -70,12 +70,17 @@ func (g *Game) createExplosion(bomb *Bomb) {
 	explosion.Duration = bomb.ExplosionDuration
 	explosion.Cells = explosion.CalculateExplosionCells(g.Map)
 
-	// 炸毁砖块
-	for _, cell := range explosion.Cells {
-		if g.Map.GetTile(cell.GridX, cell.GridY) == TileBrick {
-			g.Map.SetTile(cell.GridX, cell.GridY, TileEmpty)
-		}
-	}
+// 炸毁砖块
+for _, cell := range explosion.Cells {
+if g.Map.GetTile(cell.GridX, cell.GridY) == TileBrick {
+// 检查是否是隐藏门
+if cell.GridX == g.Map.HiddenDoorPos.X && cell.GridY == g.Map.HiddenDoorPos.Y {
+g.Map.SetTile(cell.GridX, cell.GridY, TileDoor)
+} else {
+g.Map.SetTile(cell.GridX, cell.GridY, TileEmpty)
+}
+}
+}
 
 	// 检查玩家是否被炸到
 	for _, player := range g.Players {
@@ -95,17 +100,36 @@ func (g *Game) createExplosion(bomb *Bomb) {
 
 // IsGameOver 检查游戏是否结束
 func (g *Game) IsGameOver() bool {
-	if len(g.Players) == 0 {
-		return false
-	}
+if len(g.Players) == 0 {
+return false
+}
 
-	aliveCount := 0
-	for _, player := range g.Players {
-		if !player.Dead {
-			aliveCount++
-		}
-	}
+aliveCount := 0
+var survivor *Player
 
-	// 只有一个或零个玩家存活时游戏结束
-	return aliveCount <= 1
+for _, player := range g.Players {
+if !player.Dead {
+aliveCount++
+survivor = player
+}
+}
+
+// 条件1：所有人死亡 -> 游戏结束 (失败)
+if aliveCount == 0 {
+return true
+}
+
+// 条件2：幸存者只有1人 (满足PvP胜利前置条件)
+if aliveCount == 1 {
+// 检查是否到达门 (满足Stage 1/2 通关条件)
+pGridX, pGridY := PlayerXYToGrid(int(survivor.X), int(survivor.Y))
+if g.Map.GetTile(pGridX, pGridY) == TileDoor {
+return true // 胜利！
+}
+// 只有1人幸存，但还没进门 -> 游戏继续
+return false
+}
+
+// 超过1人存活 -> 战斗继续
+return false
 }

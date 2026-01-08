@@ -4,8 +4,9 @@ import (
 	"image/color"
 	"time"
 
-	"github.com/hajimehoshi/ebiten/v2"
 	"bomberman/pkg/core"
+
+	"github.com/hajimehoshi/ebiten/v2"
 )
 
 // Direction 重新导出
@@ -49,14 +50,14 @@ const (
 
 // Game 游戏主结构（Ebiten 游戏循环）
 type Game struct {
-	coreGame       *core.Game
-	players        []*Player
-	bombRenderers  []*BombRenderer
+	coreGame           *core.Game
+	players            []*Player
+	bombRenderers      []*BombRenderer
 	explosionRenderers []*ExplosionRenderer
-	mapRenderer    *MapRenderer
-	gameOver       bool
-	lastUpdateTime time.Time
-	controlScheme  ControlScheme
+	mapRenderer        *MapRenderer
+	gameOver           bool
+	lastUpdateTime     time.Time
+	controlScheme      ControlScheme
 }
 
 // NewGame 创建新游戏
@@ -66,12 +67,12 @@ func NewGame() *Game {
 	coreGame := core.NewGame()
 
 	g := &Game{
-		coreGame:            coreGame,
-		players:             make([]*Player, 0),
-		bombRenderers:       make([]*BombRenderer, 0),
-		explosionRenderers:  make([]*ExplosionRenderer, 0),
-		lastUpdateTime:      time.Now(),
-		controlScheme:       selectedControl,
+		coreGame:           coreGame,
+		players:            make([]*Player, 0),
+		bombRenderers:      make([]*BombRenderer, 0),
+		explosionRenderers: make([]*ExplosionRenderer, 0),
+		lastUpdateTime:     time.Now(),
+		controlScheme:      selectedControl,
 	}
 
 	g.mapRenderer = NewMapRenderer(coreGame.Map)
@@ -107,6 +108,11 @@ func (g *Game) Update() error {
 
 	// 更新核心游戏逻辑
 	g.coreGame.Update(deltaTime)
+
+	// 检查游戏是否结束
+	if g.coreGame.IsGameOver() {
+		g.gameOver = true
+	}
 
 	// 同步渲染器列表
 	g.syncRenderers()
