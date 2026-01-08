@@ -131,13 +131,21 @@ func (nc *NetworkClient) GetInitialMap() *gamev1.MapState {
 func (nc *NetworkClient) dial() (net.Conn, error) {
 	switch nc.proto {
 	case "", "tcp":
-		return net.DialTimeout("tcp", nc.serverAddr, 5*time.Second)
+		conn, err := net.DialTimeout("tcp", nc.serverAddr, 5*time.Second)
+		if err != nil {
+			return nil, err
+		}
+		// 开启 TCP_NODELAY，禁用 Nagle 算法以减少延迟
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			tcpConn.SetNoDelay(true)
+		}
+		return conn, nil
 	case "kcp":
 		conn, err := kcp.DialWithOptions(nc.serverAddr, nil, 0, 0)
 		if err != nil {
 			return nil, err
 		}
-		conn.SetStreamMode(true)
+		// 不需要 SetStreamMode，我们使用长度前缀协议处理消息边界
 		return conn, nil
 	default:
 		return nil, fmt.Errorf("不支持的协议: %s", nc.proto)
