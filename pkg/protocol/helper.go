@@ -12,18 +12,24 @@ import (
 
 // NewClientInputPacket 构造输入消息包
 func NewClientInputPacket(seq int32, frameId int32, up, down, left, right, bomb bool) (*gamev1.Packet, error) {
-	input := &gamev1.ClientInput{
-		Seq: seq,
-		Inputs: []*gamev1.InputData{
-			{
-				FrameId: frameId,
-				Up:      up,
-				Down:    down,
-				Left:    left,
-				Right:   right,
-				Bomb:    bomb,
-			},
+	inputs := []*gamev1.InputData{
+		{
+			FrameId: frameId,
+			Up:      up,
+			Down:    down,
+			Left:    left,
+			Right:   right,
+			Bomb:    bomb,
 		},
+	}
+	return NewClientInputPacketWithInputs(seq, inputs)
+}
+
+// NewClientInputPacketWithInputs 构造批量输入消息包
+func NewClientInputPacketWithInputs(seq int32, inputs []*gamev1.InputData) (*gamev1.Packet, error) {
+	input := &gamev1.ClientInput{
+		Seq:    seq,
+		Inputs: inputs,
 	}
 
 	payload, err := proto.Marshal(input)

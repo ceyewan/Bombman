@@ -21,4 +21,10 @@ const (
 
 	// 输入缓冲区大小：存储未确认的输入用于重放
 	InputBufferSize = 128
+
+	// 输入提前帧数：为网络延迟预留的帧数
+	InputLeadFrames = 2
+
+	// 每次发送的输入条数
+	InputSendWindow = 4
 )

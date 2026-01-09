@@ -16,6 +16,14 @@ type NetworkGameClient struct {
 	network    *NetworkClient
 	playerID   int
 	playersMap map[int]*Player
+	inputHistory []inputFrame
+}
+
+type inputFrame struct {
+	frameID     int32
+	up, down    bool
+	left, right bool
+	bomb        bool
 }
 
 // NewNetworkGameClient 创建联机游戏客户端
@@ -39,9 +47,16 @@ func NewNetworkGameClient(network *NetworkClient, controlScheme ControlScheme) (
 // Update 更新网络游戏
 func (ngc *NetworkGameClient) Update() error {
 	// 1. 接收服务器状态
-	state := ngc.network.ReceiveState()
-	if state != nil {
-		ngc.applyServerState(state)
+	var latestState *gamev1.GameState
+	for {
+		state := ngc.network.ReceiveState()
+		if state == nil {
+			break
+		}
+		latestState = state
+	}
+	if latestState != nil {
+		ngc.applyServerState(latestState)
 	}
 
 	// 2. 发送本地输入
@@ -173,7 +188,45 @@ func (ngc *NetworkGameClient) handleInput() {
 	}
 
 	up, down, left, right, bomb := getInputState(ngc.game.controlScheme)
-	ngc.network.SendInput(ngc.game.coreGame.CurrentFrame, up, down, left, right, bomb)
+	serverFrame := ngc.network.EstimatedServerFrame()
+	if serverFrame <= 0 {
+		serverFrame = ngc.game.coreGame.CurrentFrame
+	}
+	targetFrame := serverFrame + InputLeadFrames
+
+	if len(ngc.inputHistory) > 0 && ngc.inputHistory[len(ngc.inputHistory)-1].frameID == targetFrame {
+		last := &ngc.inputHistory[len(ngc.inputHistory)-1]
+		last.up, last.down, last.left, last.right, last.bomb = up, down, left, right, bomb
+	} else {
+		ngc.inputHistory = append(ngc.inputHistory, inputFrame{
+			frameID: targetFrame,
+			up:      up,
+			down:    down,
+			left:    left,
+			right:   right,
+			bomb:    bomb,
+		})
+		if len(ngc.inputHistory) > InputBufferSize {
+			ngc.inputHistory = ngc.inputHistory[len(ngc.inputHistory)-InputBufferSize:]
+		}
+	}
+
+	start := 0
+	if len(ngc.inputHistory) > InputSendWindow {
+		start = len(ngc.inputHistory) - InputSendWindow
+	}
+	inputs := make([]*gamev1.InputData, 0, len(ngc.inputHistory)-start)
+	for _, item := range ngc.inputHistory[start:] {
+		inputs = append(inputs, &gamev1.InputData{
+			FrameId: item.frameID,
+			Up:      item.up,
+			Down:    item.down,
+			Left:    item.left,
+			Right:   item.right,
+			Bomb:    item.bomb,
+		})
+	}
+	ngc.network.SendInputBatch(inputs)
 }
 
 // handleNetworkEvents 处理网络事件

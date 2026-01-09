@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gamev1 "bomberman/api/gen/bomberman/v1"
@@ -50,6 +51,12 @@ type NetworkClient struct {
 	inputSeq        int32
 	sendChan        chan []byte
 	lastServerFrame int32
+
+	// 时间同步（毫秒）
+	timeOffsetMs        int64
+	lastServerTimeMs    int64
+	lastServerFramePong int32
+	lastRTTMs           int64
 
 	// 错误
 	errChan chan error
@@ -95,6 +102,10 @@ func (nc *NetworkClient) Connect() error {
 	// 启动发送循环
 	nc.wg.Add(1)
 	go nc.sendLoop()
+
+	// 启动 Ping 循环
+	nc.wg.Add(1)
+	go nc.pingLoop()
 
 	// 发送加入请求
 	if err := nc.sendJoinRequest(); err != nil {
@@ -291,7 +302,11 @@ func (nc *NetworkClient) handleMessage(data []byte) error {
 		return nc.sendPong(ping.ClientTime)
 
 	case gamev1.MessageType_MESSAGE_TYPE_PONG:
-		// 客户端暂不处理 Pong
+		pong, err := protocol.ParsePong(pkt)
+		if err != nil {
+			return fmt.Errorf("解析 Pong 失败: %w", err)
+		}
+		nc.handlePong(pong)
 		return nil
 
 	default:
@@ -371,6 +386,61 @@ func (nc *NetworkClient) sendMessage(data []byte) error {
 	}
 }
 
+func (nc *NetworkClient) pingLoop() {
+	defer nc.wg.Done()
+
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-nc.ctx.Done():
+			return
+		case <-ticker.C:
+			if err := nc.sendPing(); err != nil {
+				log.Printf("发送 Ping 失败: %v", err)
+			}
+		}
+	}
+}
+
+func (nc *NetworkClient) sendPing() error {
+	packet, err := protocol.NewPingPacket(time.Now().UnixMilli())
+	if err != nil {
+		return err
+	}
+	data, err := protocol.MarshalPacket(packet)
+	if err != nil {
+		return err
+	}
+	return nc.sendMessage(data)
+}
+
+func (nc *NetworkClient) handlePong(pong *gamev1.Pong) {
+	if pong == nil {
+		return
+	}
+
+	now := time.Now().UnixMilli()
+	rtt := now - pong.ClientTime
+	if rtt < 0 {
+		return
+	}
+
+	measuredOffset := pong.ServerTime - (pong.ClientTime + rtt/2)
+	prev := atomic.LoadInt64(&nc.timeOffsetMs)
+	if prev == 0 {
+		atomic.StoreInt64(&nc.timeOffsetMs, measuredOffset)
+	} else {
+		smoothed := int64(float64(prev)*0.9 + float64(measuredOffset)*0.1)
+		atomic.StoreInt64(&nc.timeOffsetMs, smoothed)
+	}
+
+	atomic.StoreInt64(&nc.lastRTTMs, rtt)
+	atomic.StoreInt64(&nc.lastServerTimeMs, pong.ServerTime)
+	atomic.StoreInt32(&nc.lastServerFramePong, pong.ServerFrame)
+}
+
 // ========== 输入 ==========
 
 // SendInput 发送玩家输入
@@ -406,6 +476,34 @@ func (nc *NetworkClient) SendInputWithSeq(frameID int32, up, down, left, right, 
 	return seq
 }
 
+// SendInputBatch 批量发送玩家输入（用于输入缓冲）
+func (nc *NetworkClient) SendInputBatch(inputs []*gamev1.InputData) int32 {
+	if !nc.connected || len(inputs) == 0 {
+		return 0
+	}
+
+	nc.inputSeq++
+	seq := nc.inputSeq
+
+	packet, err := protocol.NewClientInputPacketWithInputs(seq, inputs)
+	if err != nil {
+		log.Printf("构造批量输入失败: %v", err)
+		return seq
+	}
+
+	data, err := protocol.MarshalPacket(packet)
+	if err != nil {
+		log.Printf("序列化批量输入失败: %v", err)
+		return seq
+	}
+
+	if err := nc.sendMessage(data); err != nil {
+		log.Printf("发送批量输入失败: %v", err)
+	}
+
+	return seq
+}
+
 // ========== 状态接收 ==========
 
 // ReceiveState 接收游戏状态（非阻塞）
@@ -426,4 +524,36 @@ func (nc *NetworkClient) ReceiveEvent() *gamev1.GameEvent {
 	default:
 		return nil
 	}
+}
+
+// EstimatedServerTimeMs 估算服务器时间（毫秒）
+func (nc *NetworkClient) EstimatedServerTimeMs() int64 {
+	offset := atomic.LoadInt64(&nc.timeOffsetMs)
+	if offset == 0 {
+		return 0
+	}
+	return time.Now().UnixMilli() + offset
+}
+
+// EstimatedServerFrame 估算服务器当前帧号
+func (nc *NetworkClient) EstimatedServerFrame() int32 {
+	lastTime := atomic.LoadInt64(&nc.lastServerTimeMs)
+	lastFrame := atomic.LoadInt32(&nc.lastServerFramePong)
+	if lastTime == 0 {
+		return nc.lastServerFrame
+	}
+
+	now := nc.EstimatedServerTimeMs()
+	if now == 0 {
+		return nc.lastServerFrame
+	}
+
+	deltaMs := now - lastTime
+	if deltaMs <= 0 {
+		return lastFrame
+	}
+
+	frameStep := 1000.0 / float64(core.TPS)
+	advance := int32(float64(deltaMs) / frameStep)
+	return lastFrame + advance
 }
