@@ -1,36 +1,90 @@
-# 全面审计报告：Bomberman 网络优化建议
+# Bomberman 网络优化实现记录
+
+## 已完成 ✅
+
+### 1. 基于 RTT 的自适应参数调整
+
+**实现时间**: 2026-01-10
+
+**功能**:
+- **RTT 统计**: 20 个采样窗口的滑动平均
+- **RTT 抖动**: 标准差计算
+- **网络质量评估**: 自动评级（优秀/良好/一般/较差）
+- **自适应插值延迟**: `RTT + 2×Jitter + 50ms`，范围 50-500ms
+- **自适应输入提前帧**: `RTT / 16.6 + 1`，范围 1-6 帧
+
+**日志输出**:
+```
+[网络] RTT: 45ms, 平均: 48ms, 抖动: 5ms, 质量: 优秀
+[自适应] 插值延迟: 148ms, 输入提前: 3帧 (RTT: 48ms, 抖动: 5ms)
+```
+
+**修改文件**:
+- [internal/client/network.go](../internal/client/network.go) - RTT 统计和日志
+- [internal/client/network_constants.go](../internal/client/network_constants.go) - 常量定义
+- [internal/client/network_smoothing.go](../internal/client/network_smoothing.go) - 动态插值延迟
+- [internal/client/network_game.go](../internal/client/network_game.go) - 自适应参数计算
+
+---
+
+### 2. 服务器全局限流
+
+**实现时间**: 2026-01-10
+
+**功能**:
+- **限流器**: 使用 `golang.org/x/time/rate` 标准库令牌桶算法
+- **全局消息限流**: 每个连接所有消息类型（Ping/Join/Input）共享限流器
+- **限流阈值**: 60 消息/秒，突发容量 100（正常游戏 60 TPS + 偶尔 Ping 足够）
+- **防御范围**: 防止任意消息洪水攻击（Ping 风暴、Input 洪水、Join 洪水等）
+
+**修改文件**:
+- [internal/server/connection.go](../internal/server/connection.go) - 全局限流逻辑
+
+**实现细节**:
+```go
+import "golang.org/x/time/rate"
+
+const (
+    // 全局消息限流：每秒最多 60 个消息
+    globalMessageRateLimit = rate.Limit(60)
+    // 限流器突发容量（允许短时突发）
+    globalMessageBurst = 100
+)
+
+type Connection struct {
+    // ...
+    rateLimiter *rate.Limiter // 所有消息类型共享
+}
+
+// 在 handleMessage 中检查（处理任何消息类型前）
+if !c.rateLimiter.Allow() {
+    return fmt.Errorf("rate limit exceeded")
+}
+```
+
+**移除**: `room.go` 中原有的自定义输入限流器（已被全局限流替代）
+
+---
+
+## 待实现 📋
 
 ### 一、弱网环境优化
 
 #### 1.1 当前问题
+- ~~**无网络质量监测**：RTT 只用于时间同步，未用于自适应调整~~ ✅ 已完成
 - **心跳机制过于简单**：只有 15 秒超时检测，无法识别网络质量变化
 - **协议切换不支持**：TCP/KCP 在启动时确定，运行时无法切换
-- **无网络质量监测**：RTT 只用于时间同步，未用于自适应调整
 
 #### 1.2 建议方案
 
-**A. 网络质量评估系统**
-```go
-type NetworkQuality struct {
-    RTTAvg      float64   // 平均 RTT
-    RTTJitter   float64   // RTT 抖动（标准差）
-    PacketLoss  float64   // 丢包率（通过 seq 间隙估算）
-    LastUpdate  time.Time
-}
+**A. 网络质量评估系统** ✅ 已完成
+- ~~RTT 平均值、抖动统计~~
+- ~~网络质量等级评估~~
 
-// 质量等级
-const (
-    QualityExcellent = iota // RTT < 50ms, Jitter < 10ms
-    QualityGood             // RTT < 100ms, Jitter < 30ms
-    QualityFair             // RTT < 200ms, Jitter < 50ms
-    QualityPoor             // RTT >= 200ms or Jitter >= 50ms
-)
-```
-
-**B. 自适应参数调整**
-- `InterpolationDelayMs`：根据 RTT + 2×Jitter 动态调整
-- `InputLeadFrames`：根据 RTT/16.6 + 1 计算
-- 发送频率：弱网时降低状态广播频率（60→30 TPS）
+**B. 自适应参数调整** ✅ 已完成
+- ~~`InterpolationDelayMs`：根据 RTT + 2×Jitter 动态调整~~
+- ~~`InputLeadFrames`：根据 RTT/16.6 + 1 计算~~
+- 发送频率：弱网时降低状态广播频率（60→30 TPS）⏳ 待实现
 
 **C. KCP 自动切换方案**
 ```
@@ -93,7 +147,7 @@ func (r *Room) onPlayerDisconnect(playerID int32) {
     // 不立即删除玩家，而是标记为"掉线"
     player := r.game.GetPlayer(playerID)
     player.IsDisconnected = true
-    
+
     // 保存到 SessionStore，30秒过期
     token := generateSessionToken()
     store.Save(token, &PendingSession{
@@ -111,7 +165,7 @@ func (s *GameServer) handleReconnect(conn *Connection, req ReconnectRequest) {
         // Token 无效或过期，需要重新加入
         return sendError(conn, "Session expired")
     }
-    
+
     // 恢复会话
     room := s.roomManager.GetRoom(session.RoomID)
     room.ResumePlayer(session.PlayerID, conn)
@@ -151,7 +205,7 @@ type DeltaEncoder struct {
 // 只发送变化的字段
 func (e *DeltaEncoder) EncodeDelta(state *GameState) *DeltaState {
     delta := &DeltaState{FrameId: state.FrameId}
-    
+
     for _, p := range state.Players {
         last := e.lastPlayers[p.Id]
         if p.X != last.X || p.Y != last.Y || p.Direction != last.Direction {
@@ -179,7 +233,7 @@ var statePool = sync.Pool{
 func (r *Room) broadcastState() {
     state := statePool.Get().(*gamev1.GameState)
     defer statePool.Put(state)
-    
+
     // 重用 slice
     state.Players = state.Players[:0]
     // ... 填充数据
@@ -231,7 +285,7 @@ type Session interface {
     Close()
     CloseWithoutNotify()
     SetPlayerID(id int32)
-    
+
     // 新增
     GetConnectionInfo() ConnectionInfo
     GetStats() SessionStats
@@ -255,23 +309,10 @@ type SessionStats struct {
 }
 ```
 
-**B. 输入限流**
-```go
-type RateLimiter struct {
-    maxInputsPerSecond int
-    inputCount         int
-    lastReset          time.Time
-}
-
-func (r *Room) handleInput(ev inputEvent) {
-    limiter := r.rateLimiters[ev.playerID]
-    if !limiter.Allow() {
-        log.Printf("玩家 %d 输入过快，已限流", ev.playerID)
-        return
-    }
-    // ... 正常处理
-}
-```
+**B. 输入限流** ✅ 已完成
+- ~~使用 `x/time/rate` 标准库实现全局限流~~
+- ~~每个连接所有消息类型共享限流器~~
+- ~~60 消息/秒，突发容量 100~~
 
 **C. 连接健康监控**
 ```go
@@ -319,18 +360,30 @@ var (
 
 ---
 
-### 六、优先级建议
+## 优先级建议
 
-| 优先级 | 功能 | 工作量 | 收益 |
-|-------|------|--------|------|
-| P0 | 增量状态编码 | 中 | 高（带宽减少 50%+） |
-| P0 | 掉线重连 | 中 | 高（用户体验大幅提升） |
-| P1 | 网络质量监测 | 低 | 中（为自适应打基础） |
-| P1 | 输入限流 | 低 | 中（防止滥用） |
-| P2 | TCP/KCP 动态切换 | 高 | 中（弱网场景提升） |
-| P2 | 对象池优化 | 低 | 低（减少 GC） |
-| P3 | Prometheus 监控 | 低 | 低（运维可观测性） |
+| 优先级 | 功能 | 工作量 | 收益 | 状态 |
+|-------|------|--------|------|------|
+| P0 | 增量状态编码 | 中 | 高（带宽减少 50%+） | ⏳ 待实现 |
+| P0 | 掉线重连 | 中 | 高（用户体验大幅提升） | ⏳ 待实现 |
+| P1 | ~~网络质量监测~~ | 低 | 中（为自适应打基础） | ✅ 已完成 |
+| P1 | ~~全局限流~~ | 低 | 中（防止滥用） | ✅ 已完成 |
+| P2 | TCP/KCP 动态切换 | 高 | 中（弱网场景提升） | ⏳ 待实现 |
+| P2 | 对象池优化 | 低 | 低（减少 GC） | ⏳ 待实现 |
+| P3 | Prometheus 监控 | 低 | 低（运维可观测性） | ⏳ 待实现 |
 
 ---
 
-需要我展开其中某个方案的详细实现吗？
+## 下一步建议
+
+### 推荐 1：掉线重连（P0）
+**理由**：
+- 用户体验提升最明显
+- 网络波动时不用重新排队
+- 实现难度适中
+
+### 推荐 2：增量状态编码（P0）
+**理由**：
+- 带宽节省 50%+
+- 降低服务器 CPU 和网络压力
+- 为未来扩展更多玩家做准备

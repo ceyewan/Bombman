@@ -11,12 +11,22 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/time/rate"
 )
 
 const (
 	MaxPacketSize = 4096            // 最大消息大小
 	readTimeout   = 5 * time.Second // 读取超时
 	writeTimeout  = 1 * time.Second // 写入超时
+)
+
+// 限流配置（每个连接）
+const (
+	// 正常游戏：60 TPS 状态 + 偶尔 Ping，65 个消息/秒足够
+	globalMessageRateLimit = rate.Limit(65)
+	// 限流器突发容量（允许短时突发）
+	globalMessageBurst = 100
 )
 
 var ErrSendQueueFull = errors.New("发送队列满")
@@ -35,17 +45,21 @@ type Connection struct {
 	closeMu  sync.Mutex
 
 	lastRecvTime atomic.Value
+
+	// 全局消息限流器（所有消息类型共享）
+	rateLimiter *rate.Limiter
 }
 
 // NewConnection 创建新连接，连接到服务器上
 func NewConnection(conn net.Conn, server *GameServer) *Connection {
 	c := &Connection{
-		conn:     conn,
-		server:   server,
-		playerID: -1,                     // -1 表示未分配
-		sendChan: make(chan []byte, 256), // 发送队列缓冲区
-		closeCh:  make(chan struct{}),
-		closed:   false,
+		conn:        conn,
+		server:      server,
+		playerID:    -1,                     // -1 表示未分配
+		sendChan:    make(chan []byte, 256), // 发送队列缓冲区
+		closeCh:     make(chan struct{}),
+		closed:      false,
+		rateLimiter: rate.NewLimiter(globalMessageRateLimit, globalMessageBurst),
 	}
 	c.lastRecvTime.Store(time.Now())
 	return c
@@ -233,6 +247,12 @@ func (c *Connection) receiveLoop(ctx context.Context, wg *sync.WaitGroup) {
 
 // handleMessage 处理接收到的消息
 func (c *Connection) handleMessage(data []byte) error {
+	// 全局消息限流检查（所有消息类型共享）
+	if !c.rateLimiter.Allow() {
+		// 限流：不处理消息，静默丢弃以避免日志洪水
+		return fmt.Errorf("rate limit exceeded")
+	}
+
 	event, err := DecodePacket(data)
 	if err != nil {
 		return fmt.Errorf("反序列化失败: %w", err)
