@@ -2,6 +2,7 @@ package client
 
 import (
 	"log"
+	"time"
 
 	gamev1 "bomberman/api/gen/bomberman/v1"
 	"bomberman/pkg/core"
@@ -18,6 +19,9 @@ type NetworkGameClient struct {
 	playersMap map[int]*Player
 	inputHistory []inputFrame
 	pendingInputs []predictedInput
+	nextInputFrame int32
+	hasAuthState   bool
+	authState      authoritativeState
 }
 
 type inputFrame struct {
@@ -31,6 +35,13 @@ type predictedInput struct {
 	frameID     int32
 	up, down    bool
 	left, right bool
+}
+
+type authoritativeState struct {
+	frameID   int32
+	x, y      float64
+	direction core.DirectionType
+	isMoving  bool
 }
 
 // NewNetworkGameClient 创建联机游戏客户端
@@ -69,6 +80,14 @@ func (ngc *NetworkGameClient) Update() error {
 	// 2. 发送本地输入
 	ngc.handleInput()
 
+	if ngc.hasAuthState {
+		ngc.reconcileLocalPlayer(ngc.authState)
+		ngc.hasAuthState = false
+	}
+
+	// 2.1 更新远端玩家插值
+	ngc.updateRemoteSmoothing()
+
 	// 3. 同步渲染器
 	ngc.game.syncRenderers()
 
@@ -98,6 +117,10 @@ func (ngc *NetworkGameClient) applyServerState(state *gamev1.GameState) {
 	ngc.game.coreGame.CurrentFrame = state.FrameId
 
 	activePlayers := make(map[int]struct{}, len(state.Players))
+	serverTimeMs := ngc.network.EstimatedServerTimeMs()
+	if serverTimeMs == 0 {
+		serverTimeMs = time.Now().UnixMilli()
+	}
 
 	for _, protoPlayer := range state.Players {
 		playerID := int(protoPlayer.Id)
@@ -111,6 +134,9 @@ func (ngc *NetworkGameClient) applyServerState(state *gamev1.GameState) {
 			}
 			playerRenderer = NewPlayerFromCore(corePlayer)
 			playerRenderer.isLocal = playerID == ngc.playerID
+			if !playerRenderer.isLocal {
+				playerRenderer.smoother = NewRemoteSmoother()
+			}
 			ngc.playersMap[playerID] = playerRenderer
 			ngc.game.players = append(ngc.game.players, playerRenderer)
 			ngc.game.coreGame.AddPlayer(corePlayer)
@@ -118,18 +144,33 @@ func (ngc *NetworkGameClient) applyServerState(state *gamev1.GameState) {
 		}
 
 		corePlayer := playerRenderer.corePlayer
-		corePlayer.X = protoPlayer.X
-		corePlayer.Y = protoPlayer.Y
-		corePlayer.Direction = protocol.ProtoDirectionToCore(protoPlayer.Direction)
-		corePlayer.IsMoving = protoPlayer.IsMoving
+		if playerID == ngc.playerID {
+			corePlayer.X = protoPlayer.X
+			corePlayer.Y = protoPlayer.Y
+			corePlayer.Direction = protocol.ProtoDirectionToCore(protoPlayer.Direction)
+			corePlayer.IsMoving = protoPlayer.IsMoving
+			ngc.authState = authoritativeState{
+				frameID:   state.FrameId,
+				x:         protoPlayer.X,
+				y:         protoPlayer.Y,
+				direction: corePlayer.Direction,
+				isMoving:  protoPlayer.IsMoving,
+			}
+			ngc.hasAuthState = true
+		} else if playerRenderer.smoother != nil {
+			playerRenderer.smoother.AddStateSnapshot(
+				serverTimeMs,
+				protoPlayer.X,
+				protoPlayer.Y,
+				protocol.ProtoDirectionToCore(protoPlayer.Direction),
+				protoPlayer.IsMoving,
+			)
+		}
 		corePlayer.Dead = protoPlayer.Dead
 		corePlayer.Character = protocol.ProtoCharacterTypeToCore(protoPlayer.Character)
 		corePlayer.NextPlacementFrame = int32(protoPlayer.NextPlacementFrame)
 		corePlayer.MaxBombs = int(protoPlayer.MaxBombs)
 
-		if playerID == ngc.playerID {
-			ngc.reconcileLocalPlayer(corePlayer, state.FrameId)
-		}
 	}
 
 	// 移除已不存在的玩家
@@ -157,6 +198,20 @@ func (ngc *NetworkGameClient) applyServerState(state *gamev1.GameState) {
 	ngc.syncBombs(state.Bombs)
 	ngc.syncExplosions(state.Explosions)
 	ngc.applyTileChanges(state.TileChanges)
+}
+
+func (ngc *NetworkGameClient) updateRemoteSmoothing() {
+	serverTimeMs := ngc.network.EstimatedServerTimeMs()
+	if serverTimeMs == 0 {
+		serverTimeMs = time.Now().UnixMilli()
+	}
+
+	for _, player := range ngc.playersMap {
+		if player.isLocal || player.smoother == nil {
+			continue
+		}
+		player.smoother.UpdateInterpolation(serverTimeMs, player.corePlayer)
+	}
 }
 
 // syncBombs 同步炸弹
@@ -208,7 +263,12 @@ func (ngc *NetworkGameClient) handleInput() {
 	if serverFrame <= 0 {
 		serverFrame = ngc.game.coreGame.CurrentFrame
 	}
-	targetFrame := serverFrame + InputLeadFrames
+	desiredFrame := serverFrame + InputLeadFrames
+	if ngc.nextInputFrame < desiredFrame {
+		ngc.nextInputFrame = desiredFrame
+	}
+	targetFrame := ngc.nextInputFrame
+	ngc.nextInputFrame++
 
 	if len(ngc.inputHistory) > 0 && ngc.inputHistory[len(ngc.inputHistory)-1].frameID == targetFrame {
 		last := &ngc.inputHistory[len(ngc.inputHistory)-1]
@@ -275,10 +335,16 @@ func (ngc *NetworkGameClient) applyPredictedInput(frameID int32, up, down, left,
 	}, frameID)
 }
 
-func (ngc *NetworkGameClient) reconcileLocalPlayer(corePlayer *core.Player, serverFrame int32) {
-	if corePlayer == nil {
+func (ngc *NetworkGameClient) reconcileLocalPlayer(state authoritativeState) {
+	local := ngc.playersMap[ngc.playerID]
+	if local == nil || local.corePlayer == nil || local.corePlayer.Dead {
 		return
 	}
+
+	local.corePlayer.X = state.x
+	local.corePlayer.Y = state.y
+	local.corePlayer.Direction = state.direction
+	local.corePlayer.IsMoving = state.isMoving
 
 	if len(ngc.pendingInputs) == 0 {
 		return
@@ -286,7 +352,7 @@ func (ngc *NetworkGameClient) reconcileLocalPlayer(corePlayer *core.Player, serv
 
 	// 丢弃已经被服务器帧覆盖的输入
 	idx := 0
-	for idx < len(ngc.pendingInputs) && ngc.pendingInputs[idx].frameID <= serverFrame {
+	for idx < len(ngc.pendingInputs) && ngc.pendingInputs[idx].frameID <= state.frameID {
 		idx++
 	}
 	if idx > 0 {
