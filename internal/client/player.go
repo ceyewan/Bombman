@@ -1,68 +1,70 @@
 package client
 
 import (
-"image/color"
+	"image/color"
 
-"github.com/hajimehoshi/ebiten/v2"
-"github.com/hajimehoshi/ebiten/v2/vector"
-"bomberman/pkg/ai"
-"bomberman/pkg/core"
+	"bomberman/pkg/ai"
+	"bomberman/pkg/core"
+	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/hajimehoshi/ebiten/v2/vector"
 )
 
 // PlayerRenderer 玩家渲染器
 type PlayerRenderer struct {
-	corePlayer   *core.Player
-	CharInfo     CharacterInfo
-	AnimFrame    int
-	AnimTime     float64
+	corePlayer *core.Player
+	CharInfo   CharacterInfo
+	AnimFrame  int
+	AnimTime   float64
 }
 
 // Player 玩家（包含渲染和输入）
 type Player struct {
-corePlayer   *core.Player
-renderer     *PlayerRenderer
-aiController *ai.AIController
+	corePlayer   *core.Player
+	renderer     *PlayerRenderer
+	aiController *ai.AIController
+	isLocal      bool
+	smoother     *RemoteSmoother
 }
 
 // NewPlayer 创建新玩家
-func NewPlayer(g *Game, id int, x, y int, charType core.CharacterType, isSimulated bool) *Player {
-corePlayer := core.NewPlayer(id, x, y, charType)
-corePlayer.IsSimulated = isSimulated
+func NewPlayer(g *Game, id int, x, y int, charType core.CharacterType, useAI bool) *Player {
+	corePlayer := core.NewPlayer(id, x, y, charType)
 
-renderer := &PlayerRenderer{
-corePlayer: corePlayer,
-CharInfo:   GetCharacterInfo(charType),
-AnimFrame:  0,
-AnimTime:   0,
-}
+	renderer := &PlayerRenderer{
+		corePlayer: corePlayer,
+		CharInfo:   GetCharacterInfo(charType),
+		AnimFrame:  0,
+		AnimTime:   0,
+	}
 
-p := &Player{
-corePlayer: corePlayer,
-renderer:   renderer,
-}
+	p := &Player{
+		corePlayer: corePlayer,
+		renderer:   renderer,
+		isLocal:    !useAI,
+	}
 
-if isSimulated {
-p.aiController = ai.NewAIController(id)
-}
+	if useAI {
+		p.aiController = ai.NewAIController(id)
+	}
 
-return p
+	return p
 }
 
 // Update 更新玩家状态（输入处理）
 func (p *Player) Update(controlScheme ControlScheme, coreGame *core.Game, currentFrame int32) {
-// 处理输入
-if !p.corePlayer.Dead {
-if !p.corePlayer.IsSimulated {
-p.handleInput(controlScheme, coreGame, currentFrame)
-} else if p.aiController != nil {
-// AI 控制
-input := p.aiController.Decide(coreGame)
-core.ApplyInput(coreGame, p.corePlayer.ID, input, currentFrame)
-}
-}
+	// 处理输入
+	if !p.corePlayer.Dead {
+		if p.isLocal {
+			p.handleInput(controlScheme, coreGame, currentFrame)
+		} else if p.aiController != nil {
+			// AI 控制
+			input := p.aiController.Decide(coreGame)
+			core.ApplyInput(coreGame, p.corePlayer.ID, input, currentFrame)
+		}
+	}
 
-// 更新动画（使用固定时间步长）
-p.renderer.updateAnimation(core.FrameSeconds)
+	// 更新动画（使用固定时间步长）
+	p.renderer.updateAnimation(core.FrameSeconds)
 }
 
 // handleInput 处理键盘输入
@@ -235,9 +237,9 @@ func (r *PlayerRenderer) updateAnimation(deltaTime float64) {
 }
 
 // Getter 方法用于兼容旧代码
-func (p *Player) ID() int { return p.corePlayer.ID }
-func (p *Player) X() float64 { return p.corePlayer.X }
-func (p *Player) Y() float64 { return p.corePlayer.Y }
+func (p *Player) ID() int                       { return p.corePlayer.ID }
+func (p *Player) X() float64                    { return p.corePlayer.X }
+func (p *Player) Y() float64                    { return p.corePlayer.Y }
 func (p *Player) Character() core.CharacterType { return p.corePlayer.Character }
 
 // UpdateAnimation 更新动画（不处理输入）
@@ -257,5 +259,6 @@ func NewPlayerFromCore(corePlayer *core.Player) *Player {
 	return &Player{
 		corePlayer: corePlayer,
 		renderer:   renderer,
+		isLocal:    false,
 	}
 }

@@ -23,6 +23,7 @@ const (
 )
 
 // NetworkClient 网络客户端
+
 type NetworkClient struct {
 	conn       net.Conn
 	serverAddr string
@@ -31,6 +32,8 @@ type NetworkClient struct {
 	// 玩家信息
 	playerID  int32
 	character core.CharacterType
+	gameSeed  int64
+	tps       int32
 
 	// 网络
 	connected bool
@@ -39,18 +42,14 @@ type NetworkClient struct {
 	wg        sync.WaitGroup
 
 	// 消息队列
-	stateChan       chan *gamev1.ServerState
-	gameStartChan   chan *gamev1.GameStart
-	gameOverChan    chan *gamev1.GameOver
-	playerJoinChan  chan *gamev1.PlayerJoin
-	playerLeaveChan chan int32
+	stateChan    chan *gamev1.GameState
+	eventChan    chan *gamev1.GameEvent
+	joinRespChan chan *gamev1.JoinResponse
 
 	// 发送队列
-	inputSeq int32
-	sendChan chan []byte
-
-	// 初始地图
-	initialMap *gamev1.MapState
+	inputSeq        int32
+	sendChan        chan []byte
+	lastServerFrame int32
 
 	// 错误
 	errChan chan error
@@ -61,18 +60,16 @@ func NewNetworkClient(serverAddr, proto string, character core.CharacterType) *N
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &NetworkClient{
-		serverAddr:      serverAddr,
-		proto:           proto,
-		character:       character,
-		ctx:             ctx,
-		cancel:          cancel,
-		stateChan:       make(chan *gamev1.ServerState, 256),
-		gameStartChan:   make(chan *gamev1.GameStart, 1),
-		gameOverChan:    make(chan *gamev1.GameOver, 1),
-		playerJoinChan:  make(chan *gamev1.PlayerJoin, 16),
-		playerLeaveChan: make(chan int32, 16),
-		sendChan:        make(chan []byte, 256),
-		errChan:         make(chan error, 1),
+		serverAddr:   serverAddr,
+		proto:        proto,
+		character:    character,
+		ctx:          ctx,
+		cancel:       cancel,
+		stateChan:    make(chan *gamev1.GameState, 256),
+		eventChan:    make(chan *gamev1.GameEvent, 64),
+		joinRespChan: make(chan *gamev1.JoinResponse, 1),
+		sendChan:     make(chan []byte, 256),
+		errChan:      make(chan error, 1),
 	}
 }
 
@@ -105,11 +102,20 @@ func (nc *NetworkClient) Connect() error {
 		return fmt.Errorf("发送加入请求失败: %w", err)
 	}
 
-	// 等待游戏开始消息
+	// 等待加入响应
 	select {
-	case gameStart := <-nc.gameStartChan:
-		nc.playerID = gameStart.YourPlayerId
-		nc.initialMap = gameStart.InitialMap
+	case resp := <-nc.joinRespChan:
+		if resp == nil {
+			nc.Close()
+			return errors.New("加入响应为空")
+		}
+		if !resp.Success {
+			nc.Close()
+			return fmt.Errorf("加入失败: %s", resp.ErrorMessage)
+		}
+		nc.playerID = resp.PlayerId
+		nc.gameSeed = resp.GameSeed
+		nc.tps = resp.Tps
 		log.Printf("玩家 ID: %d", nc.playerID)
 		return nil
 
@@ -119,13 +125,8 @@ func (nc *NetworkClient) Connect() error {
 
 	case <-time.After(10 * time.Second):
 		nc.Close()
-		return errors.New("等待游戏开始超时")
+		return errors.New("等待加入响应超时")
 	}
-}
-
-// GetInitialMap 获取初始地图（由服务器下发）
-func (nc *NetworkClient) GetInitialMap() *gamev1.MapState {
-	return nc.initialMap
 }
 
 func (nc *NetworkClient) dial() (net.Conn, error) {
@@ -171,10 +172,8 @@ func (nc *NetworkClient) Close() {
 
 	// 关闭通道
 	close(nc.stateChan)
-	close(nc.gameStartChan)
-	close(nc.gameOverChan)
-	close(nc.playerJoinChan)
-	close(nc.playerLeaveChan)
+	close(nc.eventChan)
+	close(nc.joinRespChan)
 	close(nc.sendChan)
 	close(nc.errChan)
 
@@ -184,6 +183,14 @@ func (nc *NetworkClient) Close() {
 // GetPlayerID 获取玩家 ID
 func (nc *NetworkClient) GetPlayerID() int32 {
 	return nc.playerID
+}
+
+func (nc *NetworkClient) GetGameSeed() int64 {
+	return nc.gameSeed
+}
+
+func (nc *NetworkClient) GetTPS() int32 {
+	return nc.tps
 }
 
 // IsConnected 检查是否已连接
@@ -239,52 +246,56 @@ func (nc *NetworkClient) receiveLoop() {
 
 // handleMessage 处理接收到的消息
 func (nc *NetworkClient) handleMessage(data []byte) error {
-	// 反序列化
-	packet, err := protocol.Unmarshal(data)
+	pkt, err := protocol.UnmarshalPacket(data)
 	if err != nil {
 		return fmt.Errorf("反序列化失败: %w", err)
 	}
 
-	// 根据消息类型分发
-	switch payload := packet.Payload.(type) {
-	case *gamev1.GamePacket_State:
-		// 游戏状态
-		select {
-		case nc.stateChan <- payload.State:
-		default:
-			// 队列满，丢弃旧状态
+	switch pkt.Type {
+	case gamev1.MessageType_MESSAGE_TYPE_JOIN_RESPONSE:
+		resp, err := protocol.ParseJoinResponse(pkt)
+		if err != nil {
+			return fmt.Errorf("解析加入响应失败: %w", err)
 		}
-
-	case *gamev1.GamePacket_GameStart:
-		// 游戏开始
 		select {
-		case nc.gameStartChan <- payload.GameStart:
+		case nc.joinRespChan <- resp:
 		default:
 		}
 
-	case *gamev1.GamePacket_GameOver:
-		// 游戏结束
+	case gamev1.MessageType_MESSAGE_TYPE_GAME_STATE:
+		state, err := protocol.ParseGameState(pkt)
+		if err != nil {
+			return fmt.Errorf("解析状态失败: %w", err)
+		}
+		nc.lastServerFrame = state.FrameId
 		select {
-		case nc.gameOverChan <- payload.GameOver:
+		case nc.stateChan <- state:
 		default:
 		}
 
-	case *gamev1.GamePacket_PlayerJoin:
-		// 玩家加入
+	case gamev1.MessageType_MESSAGE_TYPE_GAME_EVENT:
+		event, err := protocol.ParseGameEvent(pkt)
+		if err != nil {
+			return fmt.Errorf("解析事件失败: %w", err)
+		}
 		select {
-		case nc.playerJoinChan <- payload.PlayerJoin:
+		case nc.eventChan <- event:
 		default:
 		}
 
-	case *gamev1.GamePacket_PlayerLeave:
-		// 玩家离开
-		select {
-		case nc.playerLeaveChan <- payload.PlayerLeave.PlayerId:
-		default:
+	case gamev1.MessageType_MESSAGE_TYPE_PING:
+		ping, err := protocol.ParsePing(pkt)
+		if err != nil {
+			return fmt.Errorf("解析 Ping 失败: %w", err)
 		}
+		return nc.sendPong(ping.ClientTime)
+
+	case gamev1.MessageType_MESSAGE_TYPE_PONG:
+		// 客户端暂不处理 Pong
+		return nil
 
 	default:
-		return fmt.Errorf("未知消息类型: %T", payload)
+		return fmt.Errorf("未知消息类型: %v", pkt.Type)
 	}
 
 	return nil
@@ -325,13 +336,28 @@ func (nc *NetworkClient) sendLoop() {
 // sendJoinRequest 发送加入请求
 func (nc *NetworkClient) sendJoinRequest() error {
 	protoCharType := protocol.CoreCharacterTypeToProto(nc.character)
-	packet := protocol.NewJoinRequest(protoCharType)
-
-	data, err := protocol.Marshal(packet)
+	packet, err := protocol.NewJoinRequestPacket("Player", protoCharType)
 	if err != nil {
 		return err
 	}
 
+	data, err := protocol.MarshalPacket(packet)
+	if err != nil {
+		return err
+	}
+
+	return nc.sendMessage(data)
+}
+
+func (nc *NetworkClient) sendPong(clientTime int64) error {
+	packet, err := protocol.NewPongPacket(clientTime, time.Now().UnixMilli(), nc.lastServerFrame)
+	if err != nil {
+		return err
+	}
+	data, err := protocol.MarshalPacket(packet)
+	if err != nil {
+		return err
+	}
 	return nc.sendMessage(data)
 }
 
@@ -348,12 +374,12 @@ func (nc *NetworkClient) sendMessage(data []byte) error {
 // ========== 输入 ==========
 
 // SendInput 发送玩家输入
-func (nc *NetworkClient) SendInput(up, down, left, right, bomb bool) {
-	nc.SendInputWithSeq(up, down, left, right, bomb)
+func (nc *NetworkClient) SendInput(frameID int32, up, down, left, right, bomb bool) {
+	nc.SendInputWithSeq(frameID, up, down, left, right, bomb)
 }
 
 // SendInputWithSeq 发送玩家输入并返回序号
-func (nc *NetworkClient) SendInputWithSeq(up, down, left, right, bomb bool) int32 {
+func (nc *NetworkClient) SendInputWithSeq(frameID int32, up, down, left, right, bomb bool) int32 {
 	if !nc.connected {
 		return 0
 	}
@@ -361,9 +387,13 @@ func (nc *NetworkClient) SendInputWithSeq(up, down, left, right, bomb bool) int3
 	nc.inputSeq++
 	seq := nc.inputSeq
 
-	packet := protocol.NewClientInput(seq, up, down, left, right, bomb)
+	packet, err := protocol.NewClientInputPacket(seq, frameID, up, down, left, right, bomb)
+	if err != nil {
+		log.Printf("构造输入失败: %v", err)
+		return seq
+	}
 
-	data, err := protocol.Marshal(packet)
+	data, err := protocol.MarshalPacket(packet)
 	if err != nil {
 		log.Printf("序列化输入失败: %v", err)
 		return seq
@@ -379,7 +409,7 @@ func (nc *NetworkClient) SendInputWithSeq(up, down, left, right, bomb bool) int3
 // ========== 状态接收 ==========
 
 // ReceiveState 接收游戏状态（非阻塞）
-func (nc *NetworkClient) ReceiveState() *gamev1.ServerState {
+func (nc *NetworkClient) ReceiveState() *gamev1.GameState {
 	select {
 	case state := <-nc.stateChan:
 		return state
@@ -388,42 +418,12 @@ func (nc *NetworkClient) ReceiveState() *gamev1.ServerState {
 	}
 }
 
-// ReceiveGameStart 接收游戏开始（非阻塞）
-func (nc *NetworkClient) ReceiveGameStart() *gamev1.GameStart {
+// ReceiveEvent 接收游戏事件（非阻塞）
+func (nc *NetworkClient) ReceiveEvent() *gamev1.GameEvent {
 	select {
-	case gameStart := <-nc.gameStartChan:
-		return gameStart
+	case event := <-nc.eventChan:
+		return event
 	default:
 		return nil
-	}
-}
-
-// ReceiveGameOver 接收游戏结束（非阻塞）
-func (nc *NetworkClient) ReceiveGameOver() *gamev1.GameOver {
-	select {
-	case gameOver := <-nc.gameOverChan:
-		return gameOver
-	default:
-		return nil
-	}
-}
-
-// ReceivePlayerJoin 接收玩家加入（非阻塞）
-func (nc *NetworkClient) ReceivePlayerJoin() *gamev1.PlayerJoin {
-	select {
-	case playerJoin := <-nc.playerJoinChan:
-		return playerJoin
-	default:
-		return nil
-	}
-}
-
-// ReceivePlayerLeave 接收玩家离开（非阻塞）
-func (nc *NetworkClient) ReceivePlayerLeave() int32 {
-	select {
-	case playerID := <-nc.playerLeaveChan:
-		return playerID
-	default:
-		return -1
 	}
 }

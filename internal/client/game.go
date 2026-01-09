@@ -10,7 +10,7 @@ import (
 )
 
 // Direction 重新导出
-type Direction = core.Direction
+type Direction = core.DirectionType
 
 // 常量重新导出
 const (
@@ -42,7 +42,7 @@ func (c ControlScheme) String() string {
 const (
 	ScreenWidth  = core.ScreenWidth
 	ScreenHeight = core.ScreenHeight
-	FPS          = core.FPS
+	FPS          = core.TPS
 	TileSize     = core.TileSize
 	MapWidth     = core.MapWidth
 	MapHeight    = core.MapHeight
@@ -64,7 +64,26 @@ type Game struct {
 func NewGame() *Game {
 	selectedControl := ControlWASD
 
-	coreGame := core.NewGame()
+	coreGame := core.NewGame(time.Now().UnixNano())
+
+	g := &Game{
+		coreGame:           coreGame,
+		players:            make([]*Player, 0),
+		bombRenderers:      make([]*BombRenderer, 0),
+		explosionRenderers: make([]*ExplosionRenderer, 0),
+		lastUpdateTime:     time.Now(),
+		controlScheme:      selectedControl,
+	}
+
+	g.mapRenderer = NewMapRenderer(coreGame.Map)
+
+	return g
+}
+
+func NewGameWithSeed(seed int64) *Game {
+	selectedControl := ControlWASD
+
+	coreGame := core.NewGame(seed)
 
 	g := &Game{
 		coreGame:           coreGame,
@@ -142,12 +161,12 @@ func (g *Game) Draw(screen *ebiten.Image) {
 
 	// 绘制爆炸效果
 	for _, renderer := range g.explosionRenderers {
-		renderer.Draw(screen)
+		renderer.Draw(screen, g.coreGame.CurrentFrame)
 	}
 
 	// 绘制炸弹
 	for _, renderer := range g.bombRenderers {
-		renderer.Draw(screen)
+		renderer.Draw(screen, g.coreGame.CurrentFrame)
 	}
 
 	// 绘制玩家

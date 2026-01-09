@@ -20,15 +20,16 @@ func NewBombRenderer(bomb *core.Bomb) *BombRenderer {
 }
 
 // Draw 绘制炸弹
-func (b *BombRenderer) Draw(screen *ebiten.Image) {
+func (b *BombRenderer) Draw(screen *ebiten.Image, currentFrame int32) {
 	bomb := b.Bomb
 	// 格子坐标转像素坐标
 	centerOffset := float32(core.TileSize) / 2
-	cx := float32(bomb.X*core.TileSize) + centerOffset
-	cy := float32(bomb.Y*core.TileSize) + centerOffset
+	cx := float32(bomb.GridX*core.TileSize) + centerOffset
+	cy := float32(bomb.GridY*core.TileSize) + centerOffset
 
 	// 计算闪烁效果（使用帧）
-	elapsedFrames := core.BombFuseFrames - bomb.FramesUntilExplode
+	elapsedFrames := int(bomb.ExplodeAtFrame - currentFrame)
+	elapsedFrames = core.BombFuseFrames - elapsedFrames
 	if elapsedFrames < 0 {
 		elapsedFrames = 0
 	}
@@ -94,11 +95,13 @@ func NewExplosionRenderer(explosion *core.Explosion) *ExplosionRenderer {
 }
 
 // Draw 绘制爆炸效果
-func (e *ExplosionRenderer) Draw(screen *ebiten.Image) {
+func (e *ExplosionRenderer) Draw(screen *ebiten.Image, currentFrame int32) {
 	explosion := e.Explosion
 	ratio := 0.0
-	if core.BombExplosionFrames > 0 {
-		ratio = float64(core.BombExplosionFrames-explosion.FramesRemaining) / float64(core.BombExplosionFrames)
+	totalFrames := int(explosion.ExpiresAtFrame - explosion.CreatedAtFrame)
+	if totalFrames > 0 {
+		elapsed := int(currentFrame - explosion.CreatedAtFrame)
+		ratio = float64(elapsed) / float64(totalFrames)
 	}
 	if ratio > 1 {
 		ratio = 1
@@ -108,8 +111,8 @@ func (e *ExplosionRenderer) Draw(screen *ebiten.Image) {
 	alpha := uint8(255 * (1 - ratio))
 
 	for _, cell := range explosion.Cells {
-		px := float32(cell.X * core.TileSize)
-		py := float32(cell.Y * core.TileSize)
+		px := float32(cell.GridX * core.TileSize)
+		py := float32(cell.GridY * core.TileSize)
 
 		// 爆炸动画：从中心扩散
 		scale := float32(0.3 + 0.7*math.Min(ratio*2, 1.0))
