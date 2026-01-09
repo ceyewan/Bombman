@@ -22,6 +22,9 @@ type NetworkGameClient struct {
 	nextInputFrame int32
 	hasAuthState   bool
 	authState      authoritativeState
+
+	// 自适应参数
+	lastAdaptiveUpdate time.Time
 }
 
 type inputFrame struct {
@@ -66,6 +69,13 @@ func NewNetworkGameClient(network *NetworkClient, controlScheme ControlScheme) (
 
 // Update 更新网络游戏
 func (ngc *NetworkGameClient) Update() error {
+	// 0. 更新自适应参数（每秒一次）
+	now := time.Now()
+	if now.Sub(ngc.lastAdaptiveUpdate) >= time.Second {
+		ngc.updateAdaptiveParams()
+		ngc.lastAdaptiveUpdate = now
+	}
+
 	// 1. 接收服务器状态
 	var latestState *gamev1.GameState
 	for {
@@ -273,7 +283,9 @@ func (ngc *NetworkGameClient) handleInput() {
 	if serverFrame <= 0 {
 		serverFrame = ngc.game.coreGame.CurrentFrame
 	}
-	desiredFrame := serverFrame + InputLeadFrames
+	// 使用自适应输入提前帧数
+	inputLeadFrames := ngc.GetInputLeadFrames()
+	desiredFrame := serverFrame + inputLeadFrames
 	if ngc.nextInputFrame < desiredFrame {
 		ngc.nextInputFrame = desiredFrame
 	}
@@ -468,3 +480,89 @@ func getInputState(scheme ControlScheme) (up, down, left, right, bomb bool) {
 	}
 	return
 }
+
+// ========== 自适应网络参数 ==========
+
+// updateAdaptiveParams 根据网络状态自适应调整参数
+func (ngc *NetworkGameClient) updateAdaptiveParams() {
+	rtt := ngc.network.GetRTTAvg()
+	if rtt <= 0 {
+		return
+	}
+
+	// 计算自适应插值延迟
+	interpolationDelay := ngc.calculateInterpolationDelay(rtt)
+
+	// 计算自适应输入提前帧数
+	inputLeadFrames := ngc.calculateInputLeadFrames(rtt)
+
+	// 更新所有远端玩家的插值延迟
+	updated := false
+	for _, player := range ngc.playersMap {
+		if !player.isLocal && player.smoother != nil {
+			currentDelay := player.smoother.GetInterpolationDelay()
+			if currentDelay != interpolationDelay {
+				player.smoother.SetInterpolationDelay(interpolationDelay)
+				updated = true
+			}
+		}
+	}
+
+	if updated {
+		jitter := ngc.network.GetRTTJitter()
+		log.Printf("[自适应] 插值延迟: %dms, 输入提前: %d帧 (RTT: %dms, 抖动: %dms)",
+			interpolationDelay, inputLeadFrames, rtt, jitter)
+	}
+}
+
+// calculateInterpolationDelay 计算自适应插值延迟
+// 公式: RTT + 2*Jitter + 50ms 余量
+func (ngc *NetworkGameClient) calculateInterpolationDelay(rtt int64) int64 {
+	jitter := ngc.network.GetRTTJitter()
+	delay := rtt + 2*jitter + 50
+
+	// 限制在合理范围
+	if delay < MinInterpolationDelayMs {
+		return MinInterpolationDelayMs
+	}
+	if delay > MaxInterpolationDelayMs {
+		return MaxInterpolationDelayMs
+	}
+	return delay
+}
+
+// calculateInputLeadFrames 计算自适应输入提前帧数
+// 公式: RTT/16.6 + 1 (每帧约 16.6ms @ 60FPS)
+func (ngc *NetworkGameClient) calculateInputLeadFrames(rtt int64) int32 {
+	// 每帧约 16.6ms
+	const msPerFrame = 1000.0 / 60.0
+	leadFrames := int32(float64(rtt)/msPerFrame) + 1
+
+	// 限制在合理范围
+	if leadFrames < MinInputLeadFrames {
+		return MinInputLeadFrames
+	}
+	if leadFrames > MaxInputLeadFrames {
+		return MaxInputLeadFrames
+	}
+	return leadFrames
+}
+
+// GetInterpolationDelay 获取当前自适应插值延迟
+func (ngc *NetworkGameClient) GetInterpolationDelay() int64 {
+	rtt := ngc.network.GetRTTAvg()
+	if rtt <= 0 {
+		return DefaultInterpolationDelayMs
+	}
+	return ngc.calculateInterpolationDelay(rtt)
+}
+
+// GetInputLeadFrames 获取当前自适应输入提前帧数
+func (ngc *NetworkGameClient) GetInputLeadFrames() int32 {
+	rtt := ngc.network.GetRTTAvg()
+	if rtt <= 0 {
+		return DefaultInputLeadFrames
+	}
+	return ngc.calculateInputLeadFrames(rtt)
+}
+

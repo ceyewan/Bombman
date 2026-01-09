@@ -2,9 +2,13 @@ package client
 
 // ===== 网络插值与预测配置（客户端专用）=====
 const (
-	// 插值缓冲延迟（毫秒）：远端玩家渲染时间滞后于服务器时间
+	// 默认插值缓冲延迟（毫秒）：当自适应未启用时使用
 	// 值越大越平滑，但延迟感越强；通常 100ms 是较好的折中
-	InterpolationDelayMs int64 = 100
+	DefaultInterpolationDelayMs int64 = 100
+
+	// 插值缓冲延迟范围（毫秒）
+	MinInterpolationDelayMs int64 = 50   // 最小插值延迟
+	MaxInterpolationDelayMs int64 = 500  // 最大插值延迟
 
 	// 插值缓冲区大小：存储最近 N 个状态快照
 	InterpolationBufferSize = 30
@@ -22,8 +26,12 @@ const (
 	// 输入缓冲区大小：存储未确认的输入用于重放
 	InputBufferSize = 128
 
-	// 输入提前帧数：为网络延迟预留的帧数
-	InputLeadFrames = 2
+	// 默认输入提前帧数：当自适应未启用时使用
+	DefaultInputLeadFrames = 2
+
+	// 输入提前帧数范围
+	MinInputLeadFrames = 1
+	MaxInputLeadFrames = 6
 
 	// 每次发送的输入条数
 	InputSendWindow = 4

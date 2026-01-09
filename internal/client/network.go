@@ -21,6 +21,11 @@ import (
 
 const (
 	MaxPacketSize = 4096
+
+	// RTT 采样窗口大小
+	rttSampleWindow = 20
+	// 网络状态日志打印间隔
+	statsLogInterval = 5 * time.Second
 )
 
 // NetworkClient 网络客户端
@@ -58,6 +63,12 @@ type NetworkClient struct {
 	lastServerFramePong int32
 	lastRTTMs           int64
 
+	// RTT 统计（用于自适应调整）
+	rttSamples     []int64 // RTT 采样窗口
+	rttIndex       int     // 当前采样索引
+	rttSampleCount int     // 实际采样数量
+	statsLogger    *time.Ticker
+
 	// 错误
 	errChan chan error
 }
@@ -77,6 +88,8 @@ func NewNetworkClient(serverAddr, proto string, character core.CharacterType) *N
 		joinRespChan: make(chan *gamev1.JoinResponse, 1),
 		sendChan:     make(chan []byte, 256),
 		errChan:      make(chan error, 1),
+		rttSamples:   make([]int64, rttSampleWindow),
+		statsLogger:  time.NewTicker(statsLogInterval),
 	}
 }
 
@@ -427,6 +440,13 @@ func (nc *NetworkClient) handlePong(pong *gamev1.Pong) {
 		return
 	}
 
+	// 记录 RTT 采样
+	nc.rttSamples[nc.rttIndex] = rtt
+	nc.rttIndex = (nc.rttIndex + 1) % rttSampleWindow
+	if nc.rttSampleCount < rttSampleWindow {
+		nc.rttSampleCount++
+	}
+
 	measuredOffset := pong.ServerTime - (pong.ClientTime + rtt/2)
 	prev := atomic.LoadInt64(&nc.timeOffsetMs)
 	if prev == 0 {
@@ -439,6 +459,13 @@ func (nc *NetworkClient) handlePong(pong *gamev1.Pong) {
 	atomic.StoreInt64(&nc.lastRTTMs, rtt)
 	atomic.StoreInt64(&nc.lastServerTimeMs, pong.ServerTime)
 	atomic.StoreInt32(&nc.lastServerFramePong, pong.ServerFrame)
+
+	// 定期打印网络状态
+	select {
+	case <-nc.statsLogger.C:
+		nc.logNetworkStats()
+	default:
+	}
 }
 
 // ========== 输入 ==========
@@ -557,3 +584,60 @@ func (nc *NetworkClient) EstimatedServerFrame() int32 {
 	advance := int32(float64(deltaMs) / frameStep)
 	return lastFrame + advance
 }
+
+// ========== 网络状态统计 ==========
+
+// GetLastRTT 获取最新的 RTT（毫秒）
+func (nc *NetworkClient) GetLastRTT() int64 {
+	return atomic.LoadInt64(&nc.lastRTTMs)
+}
+
+// GetRTTAvg 获取平均 RTT（毫秒）
+func (nc *NetworkClient) GetRTTAvg() int64 {
+	if nc.rttSampleCount == 0 {
+		return 0
+	}
+	var sum int64
+	for i := 0; i < nc.rttSampleCount; i++ {
+		sum += nc.rttSamples[i]
+	}
+	return sum / int64(nc.rttSampleCount)
+}
+
+// GetRTTJitter 获取 RTT 抖动（标准差，毫秒）
+func (nc *NetworkClient) GetRTTJitter() int64 {
+	if nc.rttSampleCount < 2 {
+		return 0
+	}
+	avg := nc.GetRTTAvg()
+	var variance float64
+	for i := 0; i < nc.rttSampleCount; i++ {
+		diff := float64(nc.rttSamples[i] - avg)
+		variance += diff * diff
+	}
+	variance /= float64(nc.rttSampleCount)
+	return int64(variance / float64(nc.rttSampleCount))
+}
+
+// logNetworkStats 打印网络状态统计
+func (nc *NetworkClient) logNetworkStats() {
+	rtt := nc.GetLastRTT()
+	avg := nc.GetRTTAvg()
+	jitter := nc.GetRTTJitter()
+
+	// 网络质量等级
+	quality := "优秀"
+	if avg > 50 {
+		quality = "良好"
+	}
+	if avg > 100 {
+		quality = "一般"
+	}
+	if avg > 200 || jitter > 50 {
+		quality = "较差"
+	}
+
+	log.Printf("[网络] RTT: %dms, 平均: %dms, 抖动: %dms, 质量: %s",
+		rtt, avg, jitter, quality)
+}
+

@@ -17,13 +17,31 @@ type RemoteSmoother struct {
 	lastVelocityX       float64
 	lastVelocityY       float64
 	lastUpdateTimestamp int64
+	interpolationDelayMs int64 // 当前插值延迟（可动态调整）
 }
 
 // NewRemoteSmoother 创建插值缓冲器
 func NewRemoteSmoother() *RemoteSmoother {
 	return &RemoteSmoother{
-		buffer: make([]stateSnapshot, 0, InterpolationBufferSize),
+		buffer:              make([]stateSnapshot, 0, InterpolationBufferSize),
+		interpolationDelayMs: DefaultInterpolationDelayMs,
 	}
+}
+
+// SetInterpolationDelay 设置插值延迟（毫秒）
+func (s *RemoteSmoother) SetInterpolationDelay(delayMs int64) {
+	if delayMs < MinInterpolationDelayMs {
+		delayMs = MinInterpolationDelayMs
+	}
+	if delayMs > MaxInterpolationDelayMs {
+		delayMs = MaxInterpolationDelayMs
+	}
+	s.interpolationDelayMs = delayMs
+}
+
+// GetInterpolationDelay 获取当前插值延迟（毫秒）
+func (s *RemoteSmoother) GetInterpolationDelay() int64 {
+	return s.interpolationDelayMs
 }
 
 // AddStateSnapshot 添加状态快照到缓冲区
@@ -62,8 +80,8 @@ func (s *RemoteSmoother) UpdateInterpolation(serverTimeMs int64, corePlayer *cor
 		return
 	}
 
-	// 渲染时间 = 服务器时间 - 插值延迟
-	renderTime := serverTimeMs - InterpolationDelayMs
+	// 渲染时间 = 服务器时间 - 插值延迟（使用动态值）
+	renderTime := serverTimeMs - s.interpolationDelayMs
 	s.renderTimestamp = renderTime
 
 	// 在缓冲区中找到 renderTime 两侧的快照
