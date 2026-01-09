@@ -2,127 +2,174 @@ package protocol
 
 import (
 	"errors"
-	"fmt"
 
-	// 引入生成的 proto 包
 	gamev1 "bomberman/api/gen/bomberman/v1"
 
 	"google.golang.org/protobuf/proto"
 )
 
-// ========== 辅助构造方法 (让代码更干净) ==========
+// ========== 辅助构造方法 ==========
 
-// NewClientInput 构造输入消息
-func NewClientInput(seq int32, up, down, left, right, bomb bool) *gamev1.GamePacket {
-	return &gamev1.GamePacket{
-		Payload: &gamev1.GamePacket_Input{
-			Input: &gamev1.ClientInput{
-				Seq:   seq,
-				Up:    up,
-				Down:  down,
-				Left:  left,
-				Right: right,
-				Bomb:  bomb,
+// NewClientInputPacket 构造输入消息包
+func NewClientInputPacket(seq int32, frameId int32, up, down, left, right, bomb bool) (*gamev1.Packet, error) {
+	input := &gamev1.ClientInput{
+		Seq: seq,
+		Inputs: []*gamev1.InputData{
+			{
+				FrameId: frameId,
+				Up:      up,
+				Down:    down,
+				Left:    left,
+				Right:   right,
+				Bomb:    bomb,
 			},
 		},
 	}
+
+	payload, err := proto.Marshal(input)
+	if err != nil {
+		return nil, err
+	}
+
+	return &gamev1.Packet{
+		Type:    gamev1.MessageType_MESSAGE_TYPE_CLIENT_INPUT,
+		Payload: payload,
+	}, nil
 }
 
-// NewServerState 构造状态消息
-func NewServerState(frame int32, players []*gamev1.PlayerState, bombs []*gamev1.BombState, explosions []*gamev1.ExplosionState) *gamev1.GamePacket {
-	return NewServerStateWithMeta(frame, players, bombs, explosions, nil, 0)
+// NewJoinRequestPacket 构造加入请求消息包
+func NewJoinRequestPacket(playerName string, characterType gamev1.CharacterType) (*gamev1.Packet, error) {
+	req := &gamev1.JoinRequest{
+		PlayerName: playerName,
+		Character:  characterType,
+	}
+
+	payload, err := proto.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+
+	return &gamev1.Packet{
+		Type:    gamev1.MessageType_MESSAGE_TYPE_JOIN_REQUEST,
+		Payload: payload,
+	}, nil
 }
 
-// NewServerStateWithMeta 构造状态消息（带客户端预测支持）
-func NewServerStateWithMeta(
-	frame int32,
+// NewPingPacket 构造心跳消息包
+func NewPingPacket(clientTime int64) (*gamev1.Packet, error) {
+	ping := &gamev1.Ping{
+		ClientTime: clientTime,
+	}
+
+	payload, err := proto.Marshal(ping)
+	if err != nil {
+		return nil, err
+	}
+
+	return &gamev1.Packet{
+		Type:    gamev1.MessageType_MESSAGE_TYPE_PING,
+		Payload: payload,
+	}, nil
+}
+
+// ========== 服务器消息构造 ==========
+
+// NewJoinResponsePacket 构造加入响应消息包
+func NewJoinResponsePacket(success bool, playerId int32, errorMessage string, gameSeed int64, tps int32) (*gamev1.Packet, error) {
+	resp := &gamev1.JoinResponse{
+		Success:      success,
+		PlayerId:     playerId,
+		ErrorMessage: errorMessage,
+		GameSeed:     gameSeed,
+		Tps:          tps,
+	}
+
+	payload, err := proto.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return &gamev1.Packet{
+		Type:    gamev1.MessageType_MESSAGE_TYPE_JOIN_RESPONSE,
+		Payload: payload,
+	}, nil
+}
+
+// NewGameStatePacket 构造游戏状态消息包
+func NewGameStatePacket(
+	frameId int32,
+	phase gamev1.GamePhase,
 	players []*gamev1.PlayerState,
 	bombs []*gamev1.BombState,
 	explosions []*gamev1.ExplosionState,
-	lastProcessedInputSeq map[int32]int32,
-	serverTimeMs int64,
-) *gamev1.GamePacket {
-	return &gamev1.GamePacket{
-		Payload: &gamev1.GamePacket_State{
-			State: &gamev1.ServerState{
-				FrameId:               frame,
-				Players:               players,
-				Bombs:                 bombs,
-				Explosions:            explosions,
-				LastProcessedInputSeq: lastProcessedInputSeq,
-				ServerTimeMs:          serverTimeMs,
-				// Map 建议单独处理，或者只在变化时填充
-			},
-		},
+	tileChanges []*gamev1.TileChange,
+	lastProcessedSeq map[int32]int32,
+) (*gamev1.Packet, error) {
+	state := &gamev1.GameState{
+		FrameId:            frameId,
+		Phase:              phase,
+		Players:            players,
+		Bombs:              bombs,
+		Explosions:         explosions,
+		TileChanges:        tileChanges,
+		LastProcessedSeq:   lastProcessedSeq,
 	}
+
+	payload, err := proto.Marshal(state)
+	if err != nil {
+		return nil, err
+	}
+
+	return &gamev1.Packet{
+		Type:    gamev1.MessageType_MESSAGE_TYPE_GAME_STATE,
+		Payload: payload,
+	}, nil
 }
 
-// NewJoinRequest 构造加入请求消息
-func NewJoinRequest(characterType gamev1.CharacterType) *gamev1.GamePacket {
-	return &gamev1.GamePacket{
-		Payload: &gamev1.GamePacket_JoinReq{
-			JoinReq: &gamev1.JoinRequest{
-				CharacterType: characterType,
-			},
-		},
+// NewGameEventPacket 构造游戏事件消息包
+func NewGameEventPacket(frameId int32, event *gamev1.GameEvent) (*gamev1.Packet, error) {
+	event.FrameId = frameId
+
+	payload, err := proto.Marshal(event)
+	if err != nil {
+		return nil, err
 	}
+
+	return &gamev1.Packet{
+		Type:    gamev1.MessageType_MESSAGE_TYPE_GAME_EVENT,
+		Payload: payload,
+	}, nil
 }
 
-// NewGameStart 构造游戏开始消息
-func NewGameStart(yourPlayerId int32, initialMap *gamev1.MapState) *gamev1.GamePacket {
-	return &gamev1.GamePacket{
-		Payload: &gamev1.GamePacket_GameStart{
-			GameStart: &gamev1.GameStart{
-				YourPlayerId: yourPlayerId,
-				InitialMap:   initialMap,
-			},
-		},
+// NewPongPacket 构造心跳响应消息包
+func NewPongPacket(clientTime, serverTime int64, serverFrame int32) (*gamev1.Packet, error) {
+	pong := &gamev1.Pong{
+		ClientTime:  clientTime,
+		ServerTime:  serverTime,
+		ServerFrame: serverFrame,
 	}
+
+	payload, err := proto.Marshal(pong)
+	if err != nil {
+		return nil, err
+	}
+
+	return &gamev1.Packet{
+		Type:    gamev1.MessageType_MESSAGE_TYPE_PONG,
+		Payload: payload,
+	}, nil
 }
 
-// NewGameOver 构造游戏结束消息
-func NewGameOver(winnerId int32) *gamev1.GamePacket {
-	return &gamev1.GamePacket{
-		Payload: &gamev1.GamePacket_GameOver{
-			GameOver: &gamev1.GameOver{
-				WinnerId: winnerId,
-			},
-		},
-	}
-}
+// ========== 序列化与反序列化 ==========
 
-// NewPlayerJoin 构造玩家加入消息
-func NewPlayerJoin(player *gamev1.PlayerState) *gamev1.GamePacket {
-	return &gamev1.GamePacket{
-		Payload: &gamev1.GamePacket_PlayerJoin{
-			PlayerJoin: &gamev1.PlayerJoin{
-				Player: player,
-			},
-		},
-	}
-}
-
-// NewPlayerLeave 构造玩家离开消息
-func NewPlayerLeave(playerId int32) *gamev1.GamePacket {
-	return &gamev1.GamePacket{
-		Payload: &gamev1.GamePacket_PlayerLeave{
-			PlayerLeave: &gamev1.PlayerLeave{
-				PlayerId: playerId,
-			},
-		},
-	}
-}
-
-// ========== 序列化与反序列化封装 ==========
-
-// Marshal 将消息对象转换为字节切片 (用于网络发送)
-func Marshal(pkt *gamev1.GamePacket) ([]byte, error) {
+// MarshalPacket 将 Packet 对象转换为字节切片
+func MarshalPacket(pkt *gamev1.Packet) ([]byte, error) {
 	return proto.Marshal(pkt)
 }
 
-// Unmarshal 将字节切片转换为消息对象 (用于网络接收)
-func Unmarshal(data []byte) (*gamev1.GamePacket, error) {
-	pkt := &gamev1.GamePacket{}
+// UnmarshalPacket 将字节切片转换为 Packet 对象
+func UnmarshalPacket(data []byte) (*gamev1.Packet, error) {
+	pkt := &gamev1.Packet{}
 	err := proto.Unmarshal(data, pkt)
 	if err != nil {
 		return nil, err
@@ -130,46 +177,102 @@ func Unmarshal(data []byte) (*gamev1.GamePacket, error) {
 	return pkt, nil
 }
 
-// ========== 地图辅助工具 (处理一维/二维转换) ==========
+// ========== 消息解析辅助 ==========
 
-// FlattenMap 将二维地图转为一维 (用于发送)
-func FlattenMap(grid [][]int32) *gamev1.MapState {
-	if len(grid) == 0 {
-		return &gamev1.MapState{}
+// ParseClientInput 从 Packet 中解析 ClientInput
+func ParseClientInput(pkt *gamev1.Packet) (*gamev1.ClientInput, error) {
+	if pkt.Type != gamev1.MessageType_MESSAGE_TYPE_CLIENT_INPUT {
+		return nil, errors.New("not a client input message")
 	}
-	height := len(grid)
-	width := len(grid[0])
-	tiles := make([]int32, 0, width*height)
 
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			tiles = append(tiles, grid[y][x])
-		}
+	input := &gamev1.ClientInput{}
+	err := proto.Unmarshal(pkt.Payload, input)
+	if err != nil {
+		return nil, err
 	}
-	return &gamev1.MapState{
-		Width:  int32(width),
-		Height: int32(height),
-		Tiles:  tiles,
-	}
+	return input, nil
 }
 
-// InflateMap 将一维地图还原为二维 (用于接收)
-func InflateMap(m *gamev1.MapState) ([][]int32, error) {
-	if m == nil {
-		return nil, errors.New("map state is nil")
-	}
-	width := int(m.Width)
-	height := int(m.Height)
-	if len(m.Tiles) != width*height {
-		return nil, fmt.Errorf("map data size mismatch: expected %d, got %d", width*height, len(m.Tiles))
+// ParseJoinRequest 从 Packet 中解析 JoinRequest
+func ParseJoinRequest(pkt *gamev1.Packet) (*gamev1.JoinRequest, error) {
+	if pkt.Type != gamev1.MessageType_MESSAGE_TYPE_JOIN_REQUEST {
+		return nil, errors.New("not a join request message")
 	}
 
-	grid := make([][]int32, height)
-	for y := 0; y < height; y++ {
-		grid[y] = make([]int32, width)
-		for x := 0; x < width; x++ {
-			grid[y][x] = m.Tiles[y*width+x]
-		}
+	req := &gamev1.JoinRequest{}
+	err := proto.Unmarshal(pkt.Payload, req)
+	if err != nil {
+		return nil, err
 	}
-	return grid, nil
+	return req, nil
+}
+
+// ParsePing 从 Packet 中解析 Ping
+func ParsePing(pkt *gamev1.Packet) (*gamev1.Ping, error) {
+	if pkt.Type != gamev1.MessageType_MESSAGE_TYPE_PING {
+		return nil, errors.New("not a ping message")
+	}
+
+	ping := &gamev1.Ping{}
+	err := proto.Unmarshal(pkt.Payload, ping)
+	if err != nil {
+		return nil, err
+	}
+	return ping, nil
+}
+
+// ParseGameState 从 Packet 中解析 GameState
+func ParseGameState(pkt *gamev1.Packet) (*gamev1.GameState, error) {
+	if pkt.Type != gamev1.MessageType_MESSAGE_TYPE_GAME_STATE {
+		return nil, errors.New("not a game state message")
+	}
+
+	state := &gamev1.GameState{}
+	err := proto.Unmarshal(pkt.Payload, state)
+	if err != nil {
+		return nil, err
+	}
+	return state, nil
+}
+
+// ParseGameEvent 从 Packet 中解析 GameEvent
+func ParseGameEvent(pkt *gamev1.Packet) (*gamev1.GameEvent, error) {
+	if pkt.Type != gamev1.MessageType_MESSAGE_TYPE_GAME_EVENT {
+		return nil, errors.New("not a game event message")
+	}
+
+	event := &gamev1.GameEvent{}
+	err := proto.Unmarshal(pkt.Payload, event)
+	if err != nil {
+		return nil, err
+	}
+	return event, nil
+}
+
+// ParseJoinResponse 从 Packet 中解析 JoinResponse
+func ParseJoinResponse(pkt *gamev1.Packet) (*gamev1.JoinResponse, error) {
+	if pkt.Type != gamev1.MessageType_MESSAGE_TYPE_JOIN_RESPONSE {
+		return nil, errors.New("not a join response message")
+	}
+
+	resp := &gamev1.JoinResponse{}
+	err := proto.Unmarshal(pkt.Payload, resp)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+// ParsePong 从 Packet 中解析 Pong
+func ParsePong(pkt *gamev1.Packet) (*gamev1.Pong, error) {
+	if pkt.Type != gamev1.MessageType_MESSAGE_TYPE_PONG {
+		return nil, errors.New("not a pong message")
+	}
+
+	pong := &gamev1.Pong{}
+	err := proto.Unmarshal(pkt.Payload, pong)
+	if err != nil {
+		return nil, err
+	}
+	return pong, nil
 }

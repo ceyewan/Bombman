@@ -7,16 +7,15 @@ import (
 
 // ========== Direction 转换 ==========
 
-// Proto 方向索引：UP=1, DOWN=2, LEFT=3, RIGHT=4
-// Core 方向索引：DirUp=1, DirDown=0, DirLeft=2, DirRight=3
-
 // CoreDirectionToProto 将 core.Direction 转换为 gamev1.Direction
-func CoreDirectionToProto(dir core.Direction) gamev1.Direction {
+// Core: DirDown=0, DirUp=1, DirLeft=2, DirRight=3
+// Proto: DIRECTION_DOWN=1, DIRECTION_UP=2, DIRECTION_LEFT=3, DIRECTION_RIGHT=4
+func CoreDirectionToProto(dir core.DirectionType) gamev1.Direction {
 	switch dir {
-	case core.DirUp:
-		return gamev1.Direction_DIRECTION_UP
 	case core.DirDown:
 		return gamev1.Direction_DIRECTION_DOWN
+	case core.DirUp:
+		return gamev1.Direction_DIRECTION_UP
 	case core.DirLeft:
 		return gamev1.Direction_DIRECTION_LEFT
 	case core.DirRight:
@@ -27,12 +26,12 @@ func CoreDirectionToProto(dir core.Direction) gamev1.Direction {
 }
 
 // ProtoDirectionToCore 将 gamev1.Direction 转换为 core.Direction
-func ProtoDirectionToCore(dir gamev1.Direction) core.Direction {
+func ProtoDirectionToCore(dir gamev1.Direction) core.DirectionType {
 	switch dir {
-	case gamev1.Direction_DIRECTION_UP:
-		return core.DirUp
 	case gamev1.Direction_DIRECTION_DOWN:
 		return core.DirDown
+	case gamev1.Direction_DIRECTION_UP:
+		return core.DirUp
 	case gamev1.Direction_DIRECTION_LEFT:
 		return core.DirLeft
 	case gamev1.Direction_DIRECTION_RIGHT:
@@ -44,20 +43,15 @@ func ProtoDirectionToCore(dir gamev1.Direction) core.Direction {
 
 // ========== CharacterType 转换 ==========
 
-// Proto: WHITE=1, BLACK=2, RED=3, BLUE=4
-// Core: White=0, Black=1, Red=2, Blue=3
-// 需要 -1 转换
-
 // CoreCharacterTypeToProto 将 core.CharacterType 转换为 gamev1.CharacterType
+// Core: White=0, Black=1, Red=2, Blue=3
+// Proto: WHITE=1, BLACK=2, RED=3, BLUE=4
 func CoreCharacterTypeToProto(char core.CharacterType) gamev1.CharacterType {
-	// core 从 0 开始，proto 从 1 开始，需要 +1
 	return gamev1.CharacterType(char + 1)
 }
 
 // ProtoCharacterTypeToCore 将 gamev1.CharacterType 转换为 core.CharacterType
 func ProtoCharacterTypeToCore(char gamev1.CharacterType) core.CharacterType {
-	// proto 从 1 开始，core 从 0 开始，需要 -1
-	// 如果是 UNSPECIFIED (0)，则默认为 White
 	if char == gamev1.CharacterType_CHARACTER_TYPE_UNSPECIFIED {
 		return core.CharacterWhite
 	}
@@ -73,13 +67,16 @@ func CorePlayerToProto(p *core.Player) *gamev1.PlayerState {
 	}
 
 	return &gamev1.PlayerState{
-		Id:        int32(p.ID),
-		X:         p.X,
-		Y:         p.Y,
-		Direction: CoreDirectionToProto(p.Direction),
-		IsMoving:  p.IsMoving,
-		Dead:      p.Dead,
-		Character: CoreCharacterTypeToProto(p.Character),
+		Id:                 int32(p.ID),
+		X:                  p.X,
+		Y:                  p.Y,
+		Direction:          CoreDirectionToProto(p.Direction),
+		IsMoving:           p.IsMoving,
+		Dead:               p.Dead,
+		Character:          CoreCharacterTypeToProto(p.Character),
+		NextPlacementFrame: int32(p.NextPlacementFrame),
+		CurrentBombs:       0, // 核心中不跟踪当前炸弹数，由 Game 层管理
+		MaxBombs:           int32(p.MaxBombs),
 	}
 }
 
@@ -91,202 +88,140 @@ func ProtoPlayerToCore(p *gamev1.PlayerState) *core.Player {
 	}
 
 	player := core.NewPlayer(int(p.Id), int(p.X), int(p.Y), ProtoCharacterTypeToCore(p.Character))
-	player.X = p.X
+	player.X = p.X // 修正浮点位置
 	player.Y = p.Y
 	player.Direction = ProtoDirectionToCore(p.Direction)
 	player.IsMoving = p.IsMoving
 	player.Dead = p.Dead
-	player.NetworkX = p.X
-	player.NetworkY = p.Y
-	player.LastNetworkX = p.X
-	player.LastNetworkY = p.Y
-	player.LerpProgress = 1.0
+	player.NextPlacementFrame = int(p.NextPlacementFrame)
+	player.MaxBombs = int(p.MaxBombs)
 	return player
 }
 
 // ========== Bomb 转换 ==========
 
 // CoreBombToProto 将 core.Bomb 转换为 gamev1.BombState
-// 使用帧为单位的时间，转换为毫秒传输
-func CoreBombToProto(b *core.Bomb) *gamev1.BombState {
+// 关键：直接使用帧，不再转换为毫秒！
+func CoreBombToProto(b *core.Bomb, id int32) *gamev1.BombState {
 	if b == nil {
 		return nil
 	}
 
-	// 将帧转换为毫秒（用于网络传输）
-	timeLeftMs := int32(b.FramesUntilExplode) * 1000 / core.TPS
-	if timeLeftMs < 0 {
-		timeLeftMs = 0
-	}
-
 	return &gamev1.BombState{
-		X:              float64(b.X * core.TileSize), // 格子坐标转像素
-		Y:              float64(b.Y * core.TileSize),
-		TimeLeftMs:     timeLeftMs,
+		Id:             id,
+		GridX:          int32(b.GridX),
+		GridY:          int32(b.GridY),
+		ExplodeAtFrame: b.ExplodeAtFrame,
 		ExplosionRange: int32(b.ExplosionRange),
+		OwnerId:        int32(b.OwnerID),
+		PlacedAtFrame:  b.PlacedAtFrame,
 	}
 }
 
 // ProtoBombToCore 将 gamev1.BombState 转换为 core.Bomb
-// 将毫秒转换为帧
+// 关键：直接使用帧，不再转换毫秒！
 func ProtoBombToCore(b *gamev1.BombState) *core.Bomb {
 	if b == nil {
 		return nil
 	}
 
-	// 将毫秒转换为帧
-	framesUntilExplode := int(b.TimeLeftMs) * core.TPS / 1000
-
-	// 像素坐标转格子坐标
-	gridX := int(b.X) / core.TileSize
-	gridY := int(b.Y) / core.TileSize
-
 	return &core.Bomb{
-		X:                  gridX,
-		Y:                  gridY,
-		FramesUntilExplode: framesUntilExplode,
-		PlacedAtFrame:      0, // 从 proto 无法获取
-		ExplosionRange:     int(b.ExplosionRange),
-		OwnerID:            0, // 从 proto 无法获取
-		Exploded:           false,
+		GridX:          int(b.GridX),
+		GridY:          int(b.GridY),
+		ExplodeAtFrame: b.ExplodeAtFrame,
+		PlacedAtFrame:  b.PlacedAtFrame,
+		ExplosionRange: int(b.ExplosionRange),
+		OwnerID:        int(b.OwnerId),
+		Exploded:       false,
 	}
 }
 
 // ========== Explosion 转换 ==========
 
 // CoreExplosionToProto 将 core.Explosion 转换为 gamev1.ExplosionState
-func CoreExplosionToProto(e *core.Explosion) *gamev1.ExplosionState {
+// 关键：直接使用帧，不再转换为毫秒！
+func CoreExplosionToProto(e *core.Explosion, id int32) *gamev1.ExplosionState {
 	if e == nil {
 		return nil
 	}
 
-	cells := make([]*gamev1.ExplosionCell, len(e.Cells))
+	cells := make([]*gamev1.GridCell, len(e.Cells))
 	for i, cell := range e.Cells {
-		cells[i] = &gamev1.ExplosionCell{
-			GridX: int32(cell.X),
-			GridY: int32(cell.Y),
+		cells[i] = &gamev1.GridCell{
+			X: int32(cell.GridX),
+			Y: int32(cell.GridY),
 		}
 	}
-
-	// 转换地图变化
-	tileChanges := make([]*gamev1.TileChange, len(e.TileChanges))
-	for i, tc := range e.TileChanges {
-		tileChanges[i] = &gamev1.TileChange{
-			X:       int32(tc.X),
-			Y:       int32(tc.Y),
-			NewType: int32(tc.NewType),
-		}
-	}
-
-	// 将帧转换为毫秒
-	elapsedMs := (core.BombExplosionFrames - e.FramesRemaining) * 1000 / core.TPS
 
 	return &gamev1.ExplosionState{
-		CenterX:     int32(e.CenterX),
-		CenterY:     int32(e.CenterY),
-		Range:       int32(e.Range),
-		ElapsedMs:   int64(elapsedMs),
-		Cells:       cells,
-		TileChanges: tileChanges,
+		Id:             id,
+		Cells:          cells,
+		ExpiresAtFrame: e.ExpiresAtFrame,
+		CreatedAtFrame: e.CreatedAtFrame,
 	}
 }
 
 // ProtoExplosionToCore 将 gamev1.ExplosionState 转换为 core.Explosion
+// 关键：直接使用帧，不再转换毫秒！
 func ProtoExplosionToCore(e *gamev1.ExplosionState) *core.Explosion {
 	if e == nil {
 		return nil
 	}
 
-	// 将 GridPos 转换为 ExplosionCell
-	cells := make([]core.ExplosionCell, len(e.Cells))
+	cells := make([]core.GridPos, len(e.Cells))
 	for i, cell := range e.Cells {
-		cells[i] = core.ExplosionCell{
-			GridX: int(cell.GridX),
-			GridY: int(cell.GridY),
-		}
-	}
-
-	// 将毫秒转换为帧（对于 Elapsed）
-	elapsedFrames := int(e.ElapsedMs) * core.TPS / 1000
-	framesRemaining := core.BombExplosionFrames - elapsedFrames
-	if framesRemaining < 0 {
-		framesRemaining = 0
-	}
-
-	// 同时创建 GridPos 列表
-	gridPosCells := make([]core.GridPos, len(e.Cells))
-	for i, cell := range e.Cells {
-		gridPosCells[i] = core.GridPos{X: int(cell.GridX), Y: int(cell.GridY)}
-	}
-
-	// 转换地图变化
-	tileChanges := make([]core.TileChange, len(e.TileChanges))
-	for i, tc := range e.TileChanges {
-		tileChanges[i] = core.TileChange{
-			X:       int(tc.X),
-			Y:       int(tc.Y),
-			OldType: core.TileBrick, // 无法从 proto 获取旧类型
-			NewType: core.TileType(tc.NewType),
-		}
+		cells[i] = core.GridPos{GridX: int(cell.X), GridY: int(cell.Y)}
 	}
 
 	return &core.Explosion{
-		CenterX:         int(e.CenterX),
-		CenterY:         int(e.CenterY),
-		Range:           int(e.Range),
-		FramesRemaining: framesRemaining,
-		CreatedAtFrame:  0, // 从 proto 无法获取
-		Cells:           gridPosCells,
-		OwnerID:         0, // 从 proto 无法获取
-		TileChanges:     tileChanges,
+		Cells:          cells,
+		ExpiresAtFrame: e.ExpiresAtFrame,
+		CreatedAtFrame: e.CreatedAtFrame,
+		OwnerID:        0, // 从 proto 无法获取
 	}
 }
 
-// ========== Map 转换 ==========
+// ========== TileChange 转换 ==========
 
-// CoreMapToProto 将 core.GameMap 转换为 gamev1.MapState
-func CoreMapToProto(m *core.GameMap) *gamev1.MapState {
-	if m == nil {
-		return nil
+// CoreTileTypeToProto 将 core.TileType 转换为 gamev1.TileType
+func CoreTileTypeToProto(tileType core.TileType) gamev1.TileType {
+	switch tileType {
+	case core.TileEmpty:
+		return gamev1.TileType_TILE_TYPE_EMPTY
+	case core.TileWall:
+		return gamev1.TileType_TILE_TYPE_WALL
+	case core.TileBrick:
+		return gamev1.TileType_TILE_TYPE_BRICK
+	case core.TileDoor:
+		return gamev1.TileType_TILE_TYPE_DOOR
+	default:
+		return gamev1.TileType_TILE_TYPE_UNSPECIFIED
 	}
-
-	// 转换 [][]core.TileType -> [][]int32
-	grid := make([][]int32, m.Height)
-	for y := 0; y < m.Height; y++ {
-		grid[y] = make([]int32, m.Width)
-		for x := 0; x < m.Width; x++ {
-			grid[y][x] = int32(m.Tiles[y][x])
-		}
-	}
-
-	return FlattenMap(grid)
 }
 
-// ProtoMapToCore 将 gamev1.MapState 转换为 core.GameMap
-func ProtoMapToCore(m *gamev1.MapState) (*core.GameMap, error) {
-	if m == nil {
-		return nil, nil
+// ProtoTileTypeToCore 将 gamev1.TileType 转换为 core.TileType
+func ProtoTileTypeToCore(tileType gamev1.TileType) core.TileType {
+	switch tileType {
+	case gamev1.TileType_TILE_TYPE_EMPTY:
+		return core.TileEmpty
+	case gamev1.TileType_TILE_TYPE_WALL:
+		return core.TileWall
+	case gamev1.TileType_TILE_TYPE_BRICK:
+		return core.TileBrick
+	case gamev1.TileType_TILE_TYPE_DOOR:
+		return core.TileDoor
+	default:
+		return core.TileEmpty
 	}
+}
 
-	grid, err := InflateMap(m)
-	if err != nil {
-		return nil, err
+// CoreTileChangeToProto 将 core.TileChange 转换为 gamev1.TileChange
+func CoreTileChangeToProto(tc core.TileChange) *gamev1.TileChange {
+	return &gamev1.TileChange{
+		X:       int32(tc.GridX),
+		Y:       int32(tc.GridY),
+		NewType: CoreTileTypeToProto(tc.NewType),
 	}
-
-	gameMap := &core.GameMap{
-		Width:  int(m.Width),
-		Height: int(m.Height),
-		Tiles:  make([][]core.TileType, m.Height),
-	}
-
-	for y := 0; y < int(m.Height); y++ {
-		gameMap.Tiles[y] = make([]core.TileType, m.Width)
-		for x := 0; x < int(m.Width); x++ {
-			gameMap.Tiles[y][x] = core.TileType(grid[y][x])
-		}
-	}
-
-	return gameMap, nil
 }
 
 // ========== 批量转换辅助函数 ==========
@@ -313,9 +248,9 @@ func CoreBombsToProto(bombs []*core.Bomb) []*gamev1.BombState {
 	}
 
 	protoBombs := make([]*gamev1.BombState, 0, len(bombs))
-	for _, b := range bombs {
+	for i, b := range bombs {
 		if b != nil {
-			protoBombs = append(protoBombs, CoreBombToProto(b))
+			protoBombs = append(protoBombs, CoreBombToProto(b, int32(i)))
 		}
 	}
 	return protoBombs
@@ -328,10 +263,57 @@ func CoreExplosionsToProto(explosions []*core.Explosion) []*gamev1.ExplosionStat
 	}
 
 	protoExplosions := make([]*gamev1.ExplosionState, 0, len(explosions))
-	for _, e := range explosions {
+	for i, e := range explosions {
 		if e != nil {
-			protoExplosions = append(protoExplosions, CoreExplosionToProto(e))
+			protoExplosions = append(protoExplosions, CoreExplosionToProto(e, int32(i)))
 		}
 	}
 	return protoExplosions
+}
+
+// CoreTileChangesToProto 批量转换 TileChange 列表
+func CoreTileChangesToProto(changes []core.TileChange) []*gamev1.TileChange {
+	if changes == nil {
+		return nil
+	}
+
+	protoChanges := make([]*gamev1.TileChange, 0, len(changes))
+	for _, tc := range changes {
+		protoChanges = append(protoChanges, CoreTileChangeToProto(tc))
+	}
+	return protoChanges
+}
+
+// ========== GamePhase 转换 ==========
+
+// CoreGameStateToProto 将 server.GameState 转换为 gamev1.GamePhase
+func CoreGameStateToProto(state int) gamev1.GamePhase {
+	switch state {
+	case 0: // StateWaiting
+		return gamev1.GamePhase_GAME_PHASE_WAITING
+	case 1: // StateCountdown
+		return gamev1.GamePhase_GAME_PHASE_COUNTDOWN
+	case 2: // StatePlaying
+		return gamev1.GamePhase_GAME_PHASE_PLAYING
+	case 3: // StateGameOver
+		return gamev1.GamePhase_GAME_PHASE_GAME_OVER
+	default:
+		return gamev1.GamePhase_GAME_PHASE_UNSPECIFIED
+	}
+}
+
+// ProtoGamePhaseToCore 将 gamev1.GamePhase 转换为 server.GameState
+func ProtoGamePhaseToCore(phase gamev1.GamePhase) int {
+	switch phase {
+	case gamev1.GamePhase_GAME_PHASE_WAITING:
+		return 0 // StateWaiting
+	case gamev1.GamePhase_GAME_PHASE_COUNTDOWN:
+		return 1 // StateCountdown
+	case gamev1.GamePhase_GAME_PHASE_PLAYING:
+		return 2 // StatePlaying
+	case gamev1.GamePhase_GAME_PHASE_GAME_OVER:
+		return 3 // StateGameOver
+	default:
+		return 0 // 默认等待
+	}
 }

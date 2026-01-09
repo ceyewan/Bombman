@@ -6,150 +6,237 @@ option go_package = "bomberman/api/gen/bomberman/v1;gamev1";
 
 // ========== 枚举定义 ==========
 
-// 方向枚举（与 core.Direction 对应）
-// core.DirDown = 0, DirUp = 1, DirLeft = 2, DirRight = 3
 enum Direction {
   DIRECTION_UNSPECIFIED = 0; // 未指定
-  DIRECTION_UP = 1; // 上 (DirUp)
-  DIRECTION_DOWN = 2; // 下 (DirDown) - 实际上core中是0，但为了proto兼容性从0开始
-  DIRECTION_LEFT = 3; // 左 (DirLeft)
-  DIRECTION_RIGHT = 4; // 右 (DirRight)
+  DIRECTION_DOWN = 1; // 下 (对应 core.DirDown = 0)
+  DIRECTION_UP = 2; // 上 (对应 core.DirUp = 1)
+  DIRECTION_LEFT = 3; // 左 (对应 core.DirLeft = 2)
+  DIRECTION_RIGHT = 4; // 右 (对应 core.DirRight = 3)
 }
 
-// 角色类型枚举（与 core.CharacterType 对应）
-// core.CharacterWhite = 0, CharacterBlack = 1, CharacterRed = 2, CharacterBlue = 3
 enum CharacterType {
   CHARACTER_TYPE_UNSPECIFIED = 0; // 未指定
-  CHARACTER_TYPE_WHITE = 1; // 经典白色炸弹人 (CharacterWhite)
-  CHARACTER_TYPE_BLACK = 2; // 暗夜黑战士 (CharacterBlack)
-  CHARACTER_TYPE_RED = 3; // 烈焰红爆破专家 (CharacterRed)
-  CHARACTER_TYPE_BLUE = 4; // 冰霜蓝策略大师 (CharacterBlue)
+  CHARACTER_TYPE_WHITE = 1; // 经典白色炸弹人 (core.CharacterWhite = 0)
+  CHARACTER_TYPE_BLACK = 2; // 暗夜黑战士 (core.CharacterBlack = 1)
+  CHARACTER_TYPE_RED = 3; // 烈焰红爆破专家 (core.CharacterRed = 2)
+  CHARACTER_TYPE_BLUE = 4; // 冰霜蓝策略大师 (core.CharacterBlue = 3)
 }
 
-// ========== 基础数据结构 ==========
+enum GamePhase {
+  GAME_PHASE_UNSPECIFIED = 0; // 未指定
+  GAME_PHASE_WAITING = 1; // 等待玩家
+  GAME_PHASE_COUNTDOWN = 2; // 倒计时
+  GAME_PHASE_PLAYING = 3; // 游戏中
+  GAME_PHASE_GAME_OVER = 4; // 游戏结束
+}
 
-// 玩家状态（对应 core.Player）
+enum TileType {
+  TILE_TYPE_UNSPECIFIED = 0; // 未指定
+  TILE_TYPE_EMPTY = 1; // 空地
+  TILE_TYPE_WALL = 2; // 不可破坏的墙
+  TILE_TYPE_BRICK = 3; // 可破坏的砖块
+  TILE_TYPE_DOOR = 4; // 门 (隐藏在砖块下，炸开后出现)
+}
+
+// ========== 客户端消息 ==========
+
+message InputData {
+  int32 frame_id = 1; // 客户端期望服务器应用的帧号（以服务器帧为基准）
+  bool up = 2;
+  bool down = 3;
+  bool left = 4;
+  bool right = 5;
+  bool bomb = 6;
+}
+
+// 客户端输入封包（可包含多帧输入以应对网络延迟），seq 为这个输入包的序号
+message ClientInput {
+  int32 seq = 1; // 输入序号（单调递增）
+  repeated InputData inputs = 2; // 多帧输入数据
+}
+
+// 加入游戏请求，包含玩家名称和选择的角色
+message JoinRequest {
+  string player_name = 1;
+  CharacterType character = 2;
+}
+
+// Ping-Pong 消息，用于测量延迟和时间同步，对表
+message Ping {
+  int64 client_time = 1; // 客户端时间戳（毫秒）
+}
+
+// ========== 服务器消息 ==========
+
+// 加入游戏响应，包含玩家 ID 和初始游戏配置
+message JoinResponse {
+  bool success = 1;
+  int32 player_id = 2;
+  string error_message = 3;
+
+  // 初始游戏配置
+  int64 game_seed = 4; // 地图随机种子
+  int32 tps = 5; // 服务器 TPS，例如 60 Hz
+}
+
+// 完整游戏状态（定期发送或客户端请求）
+message GameState {
+  int32 frame_id = 1; // 服务器当前帧号
+  GamePhase phase = 2; // 当前游戏阶段
+
+  map<int32, int32> last_processed_seq = 3; // playerID -> 最后处理的输入序号
+
+  // 实体状态
+  repeated PlayerState players = 4;
+  repeated BombState bombs = 5;
+  repeated ExplosionState explosions = 6;
+
+  // 地图变化（增量）
+  repeated TileChange tile_changes = 7;
+}
+
+// 增量状态更新（高频发送）
+message DeltaState {
+  int32 frame_id = 1; // 服务器当前帧号
+  int32 base_frame_id = 2; // 基于哪一帧的增量（服务器帧）
+
+  map<int32, int32> last_processed_seq = 3;
+
+  repeated PlayerDelta player_deltas = 4;
+  repeated int32 removed_bomb_ids = 5;
+  repeated BombState new_bombs = 6;
+  repeated ExplosionState new_explosions = 7;
+  repeated TileChange tile_changes = 8;
+}
+
 message PlayerState {
+  int32 id = 1; // 玩家唯一 ID
+  double x = 2; // 精确位置
+  double y = 3; // 精确位置
+  Direction direction = 4; // 朝向
+  bool is_moving = 5; // 是否在移动
+  bool dead = 6; // 是否死亡
+  CharacterType character = 7; // 角色类型
+
+  // 附加信息
+  int32 next_placement_frame = 8; // 下一次可放置炸弹的帧号（服务器帧）
+  int32 current_bombs = 9; // 当前放置的炸弹数
+  int32 max_bombs = 10; // 最大可放置炸弹数
+}
+
+message PlayerDelta {
   int32 id = 1;
-  double x = 2; // 使用 double 保持与 core.Player 的 float64 一致
-  double y = 3;
-  Direction direction = 4;
-  bool is_moving = 5;
-  bool dead = 6;
-  CharacterType character = 7;
+
+  // 可选字段，仅包含变化的部分
+  optional double x = 2;
+  optional double y = 3;
+  optional Direction direction = 4;
+  optional bool is_moving = 5;
+  optional bool dead = 6;
 }
 
-// 炸弹状态（对应 core.Bomb）
 message BombState {
-  double x = 1; // 使用 double 保持与 core.Bomb 的像素坐标一致
-  double y = 2;
-  // 倒计时剩余时间(毫秒)，比传时间戳更直观，且不需要对表
-  int32 time_left_ms = 3;
-  int32 explosion_range = 4;
+  int32 id = 1; // 炸弹唯一 ID（用于增量更新）
+  int32 grid_x = 2; // 网格位置
+  int32 grid_y = 3; // 网格位置
+  int32 explode_at_frame = 4; // 引爆帧号（服务器帧）
+  int32 explosion_range = 5; // 爆炸范围
+  int32 owner_id = 6; // 放置者玩家 ID
+  int32 placed_at_frame = 7; // 放置帧号
 }
 
-// 爆炸状态（对应 core.Explosion）
 message ExplosionState {
-  int32 center_x = 1; // 中心格子X坐标
-  int32 center_y = 2; // 中心格子Y坐标
-  int32 range = 3; // 爆炸范围
-  int64 elapsed_ms = 4; // 已逝去的时间（毫秒）
-  repeated ExplosionCell cells = 5; // 爆炸影响的格子列表
-  repeated TileChange tile_changes = 6; // 地图变化（砖块被炸、门被揭示）
+  int32 id = 1; // 爆炸唯一 ID
+  repeated GridCell cells = 2; // 受影响的网格位置
+  int32 expires_at_frame = 3; // 结束帧号（服务器帧）
+  int32 created_at_frame = 4; // 创建帧号（服务器帧）
 }
 
-// 地图变化（单个格子的变化）
+message GridCell {
+  int32 x = 1; // 网格位置
+  int32 y = 2; // 网格位置
+}
+
 message TileChange {
-  int32 x = 1; // 格子X坐标
-  int32 y = 2; // 格子Y坐标
-  int32 new_type = 3; // 新的 TileType（0=空地, 1=墙, 2=砖块, 3=门）
+  int32 x = 1; // 网格位置
+  int32 y = 2; // 网格位置
+  TileType new_type = 3; // TileType 枚举值
 }
 
-// 爆炸格子（对应 core.ExplosionCell）
-message ExplosionCell {
-  int32 grid_x = 1;
-  int32 grid_y = 2;
+// Ping-Pong 响应消息
+message Pong {
+  int64 client_time = 1; // 回传客户端时间
+  int64 server_time = 2; // 服务器时间
+  int32 server_frame = 3; // 当前服务器帧号
 }
 
-// ========== 顶层消息包 (Envelope Pattern) ==========
-// 这是 Protobuf 替代 interface{} 的标准做法
-message GamePacket {
-  // oneof 保证每次只有一种类型的消息被设置
-  oneof payload {
-    // --- 客户端 -> 服务器 ---
-    ClientInput input = 1;
-    JoinRequest join_req = 2;
+// ========== 游戏事件（可选，用于重要事件通知） ==========
 
-    // --- 服务器 -> 客户端 ---
-    ServerState state = 3;
-    GameStart game_start = 4;
-    GameOver game_over = 5;
-    PlayerJoin player_join = 6;
-    PlayerLeave player_leave = 7;
+message GameEvent {
+  int32 frame_id = 1;
+
+  oneof event {
+    PlayerJoinedEvent player_joined = 2; // 玩家加入
+    PlayerLeftEvent player_left = 3; // 玩家离开
+    PlayerDiedEvent player_died = 4; // 玩家死亡
+    BombPlacedEvent bomb_placed = 5; // 玩家放置炸弹
+    BombExplodedEvent bomb_exploded = 6; // 炸弹爆炸
+    GameStartEvent game_start = 7; // 游戏开始
+    GameOverEvent game_over = 8; // 游戏结束
   }
 }
 
-// ========== 具体消息体 ==========
-
-// 1. 玩家输入 (C -> S)
-message ClientInput {
-  // 优化：MVP版本可以直接发 bool，也可以用位掩码(int32)
-  bool up = 1;
-  bool down = 2;
-  bool left = 3;
-  bool right = 4;
-  bool bomb = 5;
-  int32 seq = 6; // 包序号，用于丢包分析或去重
-}
-
-// 2. 加入请求 (C -> S)
-message JoinRequest {
-  CharacterType character_type = 1;
-}
-
-// 3. 核心：全量状态同步 (S -> C)
-message ServerState {
-  int32 frame_id = 1; // 当前逻辑帧号
-  repeated PlayerState players = 2;
-  repeated BombState bombs = 3;
-  repeated ExplosionState explosions = 4; // 新增：爆炸状态列表
-
-  // 地图优化：
-  // 1. 不需要每帧都发地图，除非地图被炸毁了。
-  // 2. 如果要发，Proto不支持二维数组，需要扁平化。
-  // 3. 建议：只发送变化的格子，或者 MVP 简单暴力发全量一维数组
-  MapState map = 5;
-
-  // 客户端预测支持：服务器已处理的最后一个输入序号（按玩家）
-  // key = player_id, value = last_processed_input_seq
-  map<int32, int32> last_processed_input_seq = 6;
-
-  // 服务器时间戳（毫秒），用于插值缓冲
-  int64 server_time_ms = 7;
-}
-
-message MapState {
-  int32 width = 1;
-  int32 height = 2;
-  repeated int32 tiles = 3; // data[y * width + x]
-}
-
-// 4. 游戏开始 (S -> C)
-message GameStart {
-  int32 your_player_id = 1; // 告诉客户端它是谁
-  MapState initial_map = 2; // 初始地图
-}
-
-// 5. 游戏结束 (S -> C)
-message GameOver {
-  int32 winner_id = 1;
-}
-
-// 6. 玩家进出通知
-message PlayerJoin {
-  PlayerState player = 1;
-}
-
-message PlayerLeave {
+message PlayerJoinedEvent {
   int32 player_id = 1;
+  string player_name = 2;
+}
+
+message PlayerLeftEvent {
+  int32 player_id = 1;
+}
+
+message PlayerDiedEvent {
+  int32 player_id = 1;
+  int32 killer_id = 2; // 炸弹所有者，-1 表示自杀
+}
+
+message BombPlacedEvent {
+  int32 player_id = 1;
+  int32 grid_x = 2;
+  int32 grid_y = 3;
+}
+
+message BombExplodedEvent {
+  int32 bomb_id = 1;
+  repeated GridCell affected_cells = 2;
+}
+
+message GameStartEvent {
+  int32 countdown_frames = 1;
+}
+
+message GameOverEvent {
+  int32 winner_id = 1; // -1 表示平局
+}
+
+// ========== 消息包装 ==========
+
+message Packet {
+  MessageType type = 1;
+  bytes payload = 2;
+}
+
+enum MessageType {
+  MESSAGE_TYPE_UNSPECIFIED = 0;
+
+  // 客户端 -> 服务器
+  MESSAGE_TYPE_JOIN_REQUEST = 1;
+  MESSAGE_TYPE_CLIENT_INPUT = 2;
+  MESSAGE_TYPE_PING = 3;
+
+  // 服务器 -> 客户端
+  MESSAGE_TYPE_JOIN_RESPONSE = 10;
+  MESSAGE_TYPE_GAME_STATE = 11;
+  MESSAGE_TYPE_GAME_EVENT = 12;
+  MESSAGE_TYPE_PONG = 13;
 }
