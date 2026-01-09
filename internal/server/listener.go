@@ -7,12 +7,14 @@ import (
 	kcp "github.com/xtaci/kcp-go/v5"
 )
 
+// ServerListener 抽象服务器监听器接口
 type ServerListener interface {
 	Accept() (net.Conn, error)
 	Close() error
 	Addr() net.Addr
 }
 
+// newListener 根据协议创建相应的监听器
 func newListener(proto, addr string) (ServerListener, error) {
 	switch proto {
 	case "tcp":

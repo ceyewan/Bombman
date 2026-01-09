@@ -25,6 +25,7 @@ func DecodePacket(data []byte) (*ServerEvent, error) {
 			Join: &JoinEvent{
 				PlayerName:  req.PlayerName,
 				CharacterID: int32(req.Character),
+				RoomID:      req.RoomId,
 			},
 		}, nil
 

@@ -153,21 +153,22 @@ func (s *GameServer) handleJoinRequest(conn Session, req *JoinEvent) error {
 }
 
 // handleClientInput 处理客户端输入
-func (s *GameServer) handleClientInput(playerID int32, input *InputEvent) {
+func (s *GameServer) handleClientInput(conn Session, input *InputEvent) {
 	if s.roomManager == nil {
 		return
 	}
-	s.roomManager.EnqueueInput(playerID, *input)
+	s.roomManager.EnqueueInput(conn.ID(), *input)
 }
 
 // removePlayer 移除玩家
-func (s *GameServer) removePlayer(playerID int32) {
+func (s *GameServer) removePlayer(conn Session) {
 	if s.roomManager == nil {
 		return
 	}
-	s.roomManager.Leave(playerID)
+	s.roomManager.Leave(conn.ID(), conn.GetRoomID())
 }
 
+// handlePing 处理客户端 Ping 请求，并回复 Pong，包含服务器时间和当前帧数
 func (s *GameServer) handlePing(conn Session, ping *PingEvent) {
 	if ping == nil {
 		return

@@ -22,10 +22,12 @@ type InputData struct {
 type JoinEvent struct {
 	PlayerName  string
 	CharacterID int32
+	RoomID      string // 房间 ID，空字符串表示自动分配到默认房间
 }
 
 type InputEvent struct {
 	PlayerID int32
+	RoomID   string // 房间 ID
 	Seq      int32
 	Inputs   []InputData
 }

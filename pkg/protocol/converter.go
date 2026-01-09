@@ -93,7 +93,7 @@ func ProtoPlayerToCore(p *gamev1.PlayerState) *core.Player {
 	player.Direction = ProtoDirectionToCore(p.Direction)
 	player.IsMoving = p.IsMoving
 	player.Dead = p.Dead
-	player.NextPlacementFrame = int(p.NextPlacementFrame)
+	player.NextPlacementFrame = int32(p.NextPlacementFrame)
 	player.MaxBombs = int(p.MaxBombs)
 	return player
 }

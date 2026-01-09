@@ -11,8 +11,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"bomberman/pkg/protocol"
 )
 
 const (
@@ -28,6 +26,7 @@ type Connection struct {
 	conn     net.Conn
 	server   *GameServer
 	playerID int32
+	roomID   string // 玩家所属的房间 ID
 
 	// 发送队列
 	sendChan chan []byte
@@ -36,8 +35,6 @@ type Connection struct {
 	closeMu  sync.Mutex
 
 	lastRecvTime atomic.Value
-	lastPingTime atomic.Value
-	rtt          atomic.Int64
 }
 
 // NewConnection 创建新连接，连接到服务器上
@@ -51,7 +48,6 @@ func NewConnection(conn net.Conn, server *GameServer) *Connection {
 		closed:   false,
 	}
 	c.lastRecvTime.Store(time.Now())
-	c.lastPingTime.Store(time.Time{})
 	return c
 }
 
@@ -113,7 +109,7 @@ func (c *Connection) closeWithNotify(notify bool) {
 	// 从服务器移除玩家
 	if notify {
 		if playerID := c.getPlayerID(); playerID >= 0 {
-			c.server.removePlayer(playerID)
+			c.server.removePlayer(c)
 		}
 	}
 
@@ -255,13 +251,11 @@ func (c *Connection) handleMessage(data []byte) error {
 
 	case EventInput:
 		event.Input.PlayerID = c.getPlayerID()
-		c.server.handleClientInput(c.getPlayerID(), event.Input)
+		event.Input.RoomID = c.GetRoomID()
+		c.server.handleClientInput(c, event.Input)
 
 	case EventPing:
 		c.server.handlePing(c, event.Ping)
-
-	case EventPong:
-		c.handlePong(event.Pong)
 
 	default:
 		return fmt.Errorf("未知消息类型")
@@ -288,6 +282,14 @@ func (c *Connection) setPlayerID(playerID int32) {
 
 func (c *Connection) ID() int32 {
 	return c.getPlayerID()
+}
+
+func (c *Connection) GetRoomID() string {
+	return c.roomID
+}
+
+func (c *Connection) SetRoomID(roomID string) {
+	c.roomID = roomID
 }
 
 func (c *Connection) SetPlayerID(playerID int32) {
@@ -318,31 +320,8 @@ func (c *Connection) startHeartbeat(ctx context.Context, wg *sync.WaitGroup) {
 				c.Close()
 				return
 			}
-			c.sendPing()
 		}
 	}
-}
-
-func (c *Connection) sendPing() {
-	packet, err := protocol.NewPingPacket(time.Now().UnixMilli())
-	if err != nil {
-		return
-	}
-	data, err := protocol.MarshalPacket(packet)
-	if err != nil {
-		return
-	}
-	c.lastPingTime.Store(time.Now())
-	_ = c.Send(data)
-}
-
-func (c *Connection) handlePong(pong *PongEvent) {
-	c.lastRecvTime.Store(time.Now())
-	if pong == nil || pong.ClientTime <= 0 {
-		return
-	}
-	rtt := time.Now().UnixMilli() - pong.ClientTime
-	c.rtt.Store(rtt)
 }
 
 func (c *Connection) onMessageReceived() {

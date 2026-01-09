@@ -59,6 +59,7 @@ message ClientInput {
 message JoinRequest {
   string player_name = 1;
   CharacterType character = 2;
+  string room_id = 3; // 房间 ID，空字符串表示自动分配到默认房间
 }
 
 // Ping-Pong 消息，用于测量延迟和时间同步，对表
