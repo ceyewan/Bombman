@@ -28,11 +28,15 @@ type Room struct {
 
 	connections     map[int32]Session
 	nextPlayerID    int32
-	inputQueue      map[int32]InputEvent
+	inputQueue      map[int32]map[int32]InputData
 	sendQueueFullAt map[int32]time.Time
+	lastInput       map[int32]InputData
 
 	// 客户端预测支持：记录每个玩家最后处理的输入序号
 	lastProcessedInputSeq map[int32]int32
+
+	// 记录上一帧玩家死亡状态，用于检测变化
+	lastPlayerDeadState map[int32]bool
 
 	joinCh  chan joinRequest
 	inputCh chan inputEvent
@@ -63,9 +67,11 @@ func NewRoom(parent context.Context, enableAI bool) *Room {
 		aiControllers:         make(map[int32]*ai.AIController),
 		connections:           make(map[int32]Session),
 		nextPlayerID:          1,
-		inputQueue:            make(map[int32]InputEvent),
+		inputQueue:            make(map[int32]map[int32]InputData),
 		sendQueueFullAt:       make(map[int32]time.Time),
+		lastInput:             make(map[int32]InputData),
 		lastProcessedInputSeq: make(map[int32]int32),
+		lastPlayerDeadState:   make(map[int32]bool),
 		joinCh:                make(chan joinRequest),
 		inputCh:               make(chan inputEvent, 256),
 		leaveCh:               make(chan int32, 256),
@@ -164,6 +170,9 @@ func (r *Room) tick() {
 	// 增加帧 ID（game.CurrentFrame 已在 Update 中递增）
 	r.frameID = r.game.CurrentFrame
 
+	// 检测玩家死亡状态变化并广播
+	r.checkAndBroadcastPlayerDeaths()
+
 	if shouldEnd, winnerID := r.checkGameOver(); shouldEnd {
 		r.handleGameOver(winnerID)
 	}
@@ -173,34 +182,80 @@ func (r *Room) tick() {
 	}
 }
 
-func (r *Room) applyInputs() {
-	if len(r.inputQueue) == 0 {
-		return
-	}
+func (r *Room) checkAndBroadcastPlayerDeaths() {
+	for _, player := range r.game.Players {
+		playerID := int32(player.ID)
+		wasDead := r.lastPlayerDeadState[playerID]
+		isDead := player.Dead
 
-	inputs := r.inputQueue
-	r.inputQueue = make(map[int32]InputEvent, len(inputs))
+		// 初始化状态（第一次看到这个玩家）
+		if !wasDead && !isDead {
+			r.lastPlayerDeadState[playerID] = false
+			continue
+		}
 
-	for playerID, input := range inputs {
-		r.applyInput(playerID, input)
-		// 记录已处理的输入序号
-		if input.Seq > r.lastProcessedInputSeq[playerID] {
-			r.lastProcessedInputSeq[playerID] = input.Seq
+		// 检测死亡事件：从存活变为死亡
+		if !wasDead && isDead {
+			r.lastPlayerDeadState[playerID] = true
+			log.Printf("玩家 %d 被炸死", playerID)
+
+			// 广播玩家死亡事件
+			event := &gamev1.GameEvent{
+				Event: &gamev1.GameEvent_PlayerDied{
+					PlayerDied: &gamev1.PlayerDiedEvent{
+						PlayerId: playerID,
+					},
+				},
+			}
+			packet, err := protocol.NewGameEventPacket(r.frameID, event)
+			if err != nil {
+				log.Printf("构造玩家死亡事件失败: %v", err)
+				continue
+			}
+
+			data, err := protocol.MarshalPacket(packet)
+			if err != nil {
+				log.Printf("序列化玩家死亡事件失败: %v", err)
+				continue
+			}
+
+			for _, conn := range r.connections {
+				if err := conn.Send(data); err != nil {
+					log.Printf("发送玩家死亡事件到玩家 %d 失败: %v", conn.ID(), err)
+				}
+			}
 		}
 	}
 }
 
-func (r *Room) applyInput(playerID int32, input InputEvent) {
-	if len(input.Inputs) == 0 {
+func (r *Room) applyInputs() {
+	if len(r.connections) == 0 {
 		return
 	}
-	last := input.Inputs[len(input.Inputs)-1]
+
+	for playerID := range r.connections {
+		inputData, ok := r.popInputForFrame(playerID, r.frameID)
+		if !ok {
+			last, hasLast := r.lastInput[playerID]
+			if !hasLast {
+				continue
+			}
+			inputData = last
+		} else {
+			r.lastInput[playerID] = inputData
+		}
+
+		r.applyInputData(playerID, inputData)
+	}
+}
+
+func (r *Room) applyInputData(playerID int32, input InputData) {
 	ci := core.Input{
-		Up:    last.Up,
-		Down:  last.Down,
-		Left:  last.Left,
-		Right: last.Right,
-		Bomb:  last.Bomb,
+		Up:    input.Up,
+		Down:  input.Down,
+		Left:  input.Left,
+		Right: input.Right,
+		Bomb:  input.Bomb,
 	}
 
 	// ApplyInput 现在需要帧号而不是 deltaTime
@@ -304,7 +359,26 @@ func (r *Room) handleInput(ev inputEvent) {
 		return
 	}
 
-	r.inputQueue[ev.playerID] = ev.input
+	if len(ev.input.Inputs) == 0 {
+		return
+	}
+
+	queue, ok := r.inputQueue[ev.playerID]
+	if !ok {
+		queue = make(map[int32]InputData)
+		r.inputQueue[ev.playerID] = queue
+	}
+
+	for _, in := range ev.input.Inputs {
+		if in.FrameID < r.frameID-InputBufferFrames {
+			continue
+		}
+		queue[in.FrameID] = in
+	}
+
+	if ev.input.Seq > r.lastProcessedInputSeq[ev.playerID] {
+		r.lastProcessedInputSeq[ev.playerID] = ev.input.Seq
+	}
 }
 
 func (r *Room) handleLeave(playerID int32) {
@@ -316,6 +390,7 @@ func (r *Room) handleLeave(playerID int32) {
 	delete(r.inputQueue, playerID)
 	delete(r.sendQueueFullAt, playerID)
 	delete(r.lastProcessedInputSeq, playerID)
+	delete(r.lastInput, playerID)
 
 	r.removePlayerByID(playerID)
 
@@ -356,7 +431,9 @@ func (r *Room) handleGameOver(winnerID int32) {
 }
 
 func (r *Room) resetRoom() {
-	r.closeAllConnections(false)
+	// 关闭所有连接并通知客户端游戏结束
+	r.closeAllConnections(true)
+
 	r.game = core.NewGame(0)
 	r.frameID = 0
 	r.state = StateWaiting
@@ -364,9 +441,13 @@ func (r *Room) resetRoom() {
 	r.nextPlayerID = 1
 	r.aiControllers = make(map[int32]*ai.AIController)
 	r.connections = make(map[int32]Session)
-	r.inputQueue = make(map[int32]InputEvent)
+	r.inputQueue = make(map[int32]map[int32]InputData)
 	r.sendQueueFullAt = make(map[int32]time.Time)
 	r.lastProcessedInputSeq = make(map[int32]int32)
+	r.lastInput = make(map[int32]InputData)
+	r.lastPlayerDeadState = make(map[int32]bool)
+
+	log.Println("房间已重置，等待新玩家加入")
 }
 
 func (r *Room) closeAllConnections(notify bool) {
@@ -436,6 +517,29 @@ func (r *Room) broadcastState() {
 		}
 		delete(r.sendQueueFullAt, conn.ID())
 	}
+}
+
+const InputBufferFrames = 120
+
+func (r *Room) popInputForFrame(playerID int32, frameID int32) (InputData, bool) {
+	queue, ok := r.inputQueue[playerID]
+	if !ok {
+		return InputData{}, false
+	}
+	input, ok := queue[frameID]
+	if ok {
+		delete(queue, frameID)
+	}
+
+	if len(queue) > InputBufferFrames*2 {
+		for f := range queue {
+			if f < frameID-InputBufferFrames {
+				delete(queue, f)
+			}
+		}
+	}
+
+	return input, ok
 }
 
 const sendQueueFullGrace = 2 * time.Second
