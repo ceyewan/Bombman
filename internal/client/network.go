@@ -183,6 +183,22 @@ func (nc *NetworkClient) dial() (net.Conn, error) {
 	}
 }
 
+// dialKCP 使用 KCP 协议建立连接（用于重连）
+func (nc *NetworkClient) dialKCP() (net.Conn, error) {
+	conn, err := kcp.DialWithOptions(nc.serverAddr, nil, 0, 0)
+	if err != nil {
+		return nil, err
+	}
+	// 配置 KCP 参数以获得更低延迟
+	// kcp.DialWithOptions 返回的就是 *kcp.UDPSession
+	conn.SetStreamMode(true) // 使用流模式处理消息边界
+	conn.SetNoDelay(1, 10, 2, 1) // nodelay=1, interval=10ms, resend=2, nc=1
+	conn.SetWindowSize(128, 128)
+	conn.SetMtu(1400)
+	conn.SetACKNoDelay(true)
+	return conn, nil
+}
+
 // Close 关闭连接
 func (nc *NetworkClient) Close() {
 	if !nc.connected {
@@ -661,14 +677,14 @@ func (nc *NetworkClient) logNetworkStats() {
 
 // ========== 重连 ==========
 
-// Reconnect 重连到服务器
+// Reconnect 重连到服务器（使用 KCP 协议以获得更低延迟）
 // 返回当前游戏状态用于恢复
 func (nc *NetworkClient) Reconnect() (*gamev1.GameState, error) {
 	if nc.sessionToken == "" {
 		return nil, errors.New("没有会话令牌，无法重连")
 	}
 
-	log.Printf("正在重连到服务器...")
+	log.Printf("正在重连到服务器 (KCP)...")
 
 	// 关闭旧连接但保留状态
 	nc.connected = false
@@ -683,15 +699,15 @@ func (nc *NetworkClient) Reconnect() (*gamev1.GameState, error) {
 	nc.ctx = ctx
 	nc.cancel = cancel
 
-	// 重新建立连接
-	conn, err := nc.dial()
+	// 重新建立连接（重连时使用 KCP）
+	conn, err := nc.dialKCP()
 	if err != nil {
 		return nil, fmt.Errorf("重连失败: %w", err)
 	}
 	nc.conn = conn
 	nc.connected = true
 
-	log.Printf("已重连到服务器: %s", conn.RemoteAddr())
+	log.Printf("已重连到服务器 (KCP): %s", conn.RemoteAddr())
 
 	// 启动接收循环
 	nc.wg.Add(1)
@@ -722,7 +738,7 @@ func (nc *NetworkClient) Reconnect() (*gamev1.GameState, error) {
 			nc.Close()
 			return nil, fmt.Errorf("重连失败: %s", resp.ErrorMessage)
 		}
-		log.Printf("重连成功，玩家 ID: %d", nc.playerID)
+		log.Printf("重连成功 (KCP)，玩家 ID: %d", nc.playerID)
 		return resp.CurrentState, nil
 
 	case err := <-nc.errChan:

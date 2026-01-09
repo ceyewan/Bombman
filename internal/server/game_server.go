@@ -33,10 +33,11 @@ type GameServer struct {
 	// 配置
 	enableAI bool
 
-	// 网络
-	listener ServerListener
-	addr     string
-	proto    string
+	// 网络 - 支持双协议监听
+	tcpListener ServerListener
+	kcpListener ServerListener
+	tcpAddr     string
+	kcpAddr     string
 
 	// 控制
 	ctx      context.Context
@@ -50,34 +51,47 @@ func NewGameServer(addr, proto string, enableAI bool) *GameServer {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &GameServer{
-		addr:     addr,                // 监听地址
-		proto:    proto,               // 监听协议
-		enableAI: enableAI,            // 是否启用 AI
-		ctx:      ctx,                 // 上下文
-		cancel:   cancel,              // 取消函数
-		shutdown: make(chan struct{}), // 关闭信号
+		tcpAddr:  addr, // TCP 监听地址
+		kcpAddr:  addr, // KCP 监听同一地址（不同协议）
+		enableAI: enableAI,
+		ctx:      ctx,
+		cancel:   cancel,
+		shutdown: make(chan struct{}),
 	}
 }
 
 // Start 启动服务器
 func (s *GameServer) Start() error {
-	log.Printf("启动游戏服务器: %s", s.addr)
+	log.Printf("启动游戏服务器 (TCP + KCP): %s", s.tcpAddr)
 
-	// 监听 TCP 端口
-	listener, err := newListener(s.proto, s.addr)
+	// 监听 TCP
+	tcpListener, err := newListener("tcp", s.tcpAddr)
 	if err != nil {
-		return fmt.Errorf("监听失败: %w", err)
+		return fmt.Errorf("监听 TCP 失败: %w", err)
 	}
-	s.listener = listener
+	s.tcpListener = tcpListener
 
-	log.Printf("服务器监听中: %s", s.addr)
+	// 监听 KCP
+	kcpListener, err := newListener("kcp", s.kcpAddr)
+	if err != nil {
+		tcpListener.Close()
+		return fmt.Errorf("监听 KCP 失败: %w", err)
+	}
+	s.kcpListener = kcpListener
+
+	log.Printf("TCP 监听中: %s", s.tcpAddr)
+	log.Printf("KCP 监听中: %s", s.kcpAddr)
 
 	s.roomManager = NewRoomManager(s.ctx, s.enableAI)
 	s.roomManager.Run(&s.wg)
 
-	// 启动连接接受循环
+	// 启动 TCP 连接接受循环
 	s.wg.Add(1)
-	go s.acceptLoop()
+	go s.acceptLoopTCP()
+
+	// 启动 KCP 连接接受循环
+	s.wg.Add(1)
+	go s.acceptLoopKCP()
 
 	// 等待关闭信号
 	<-s.shutdown
@@ -98,8 +112,11 @@ func (s *GameServer) Shutdown() {
 	}
 
 	// 关闭监听器
-	if s.listener != nil {
-		s.listener.Close()
+	if s.tcpListener != nil {
+		s.tcpListener.Close()
+	}
+	if s.kcpListener != nil {
+		s.kcpListener.Close()
 	}
 
 	// 关闭 shutdown 通道
@@ -111,30 +128,40 @@ func (s *GameServer) Shutdown() {
 	log.Println("服务器已关闭")
 }
 
-// acceptLoop 接受客户端连接
-func (s *GameServer) acceptLoop() {
+// acceptLoopTCP 接受 TCP 客户端连接
+func (s *GameServer) acceptLoopTCP() {
 	defer s.wg.Done()
+	s.acceptLoop("TCP", s.tcpListener)
+}
 
+// acceptLoopKCP 接受 KCP 客户端连接
+func (s *GameServer) acceptLoopKCP() {
+	defer s.wg.Done()
+	s.acceptLoop("KCP", s.kcpListener)
+}
+
+// acceptLoop 通用连接接受循环
+func (s *GameServer) acceptLoop(proto string, listener ServerListener) {
 	for {
 		select {
 		case <-s.ctx.Done():
-			log.Println("停止接受新连接")
+			log.Printf("停止接受新 %s 连接", proto)
 			return
 		default:
 		}
 
-		conn, err := s.listener.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
 			select {
 			case <-s.ctx.Done():
 				return
 			default:
-				log.Printf("接受连接失败: %v", err)
+				log.Printf("[%s] 接受连接失败: %v", proto, err)
 				continue
 			}
 		}
 
-		log.Printf("新连接来自: %s", conn.RemoteAddr())
+		log.Printf("[%s] 新连接来自: %s", proto, conn.RemoteAddr())
 
 		// 创建连接对象
 		connection := NewConnection(conn, s)
