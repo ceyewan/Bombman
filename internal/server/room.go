@@ -17,6 +17,7 @@ import (
 type Room struct {
 	ctx    context.Context
 	cancel context.CancelFunc
+	id     string // 房间 ID
 
 	game    *core.Game
 	frameID int32
@@ -60,6 +61,7 @@ func NewRoom(parent context.Context, enableAI bool) *Room {
 	return &Room{
 		ctx:                   ctx,
 		cancel:                cancel,
+		id:                    "default", // 默认房间 ID
 		game:                  core.NewGame(0),
 		frameID:               0,
 		state:                 StateWaiting,
@@ -301,19 +303,21 @@ func (r *Room) handleJoin(req joinRequest) {
 	req.conn.SetPlayerID(playerID)
 	r.connections[playerID] = req.conn
 
-	// 发送 JoinResponse（包含玩家ID和游戏配置）
-	resp := &gamev1.JoinResponse{
-		Success:  true,
-		PlayerId: playerID,
-		GameSeed: r.game.Seed,
-		Tps:      int32(core.TPS),
+	// 生成会话 Token（用于重连）
+	sessionToken, err := GenerateSessionToken(playerID, r.id)
+	if err != nil {
+		req.respCh <- fmt.Errorf("生成会话 Token 失败: %w", err)
+		return
 	}
+
+	// 发送 JoinResponse（包含玩家ID和游戏配置）
 	packet, err := protocol.NewJoinResponsePacket(
-		resp.Success,
-		resp.PlayerId,
+		true,
+		playerID,
 		"",
-		resp.GameSeed,
-		resp.Tps,
+		r.game.Seed,
+		int32(core.TPS),
+		sessionToken,
 	)
 	if err != nil {
 		req.respCh <- fmt.Errorf("构造加入响应失败: %w", err)
@@ -517,6 +521,52 @@ func (r *Room) broadcastState() {
 		}
 		delete(r.sendQueueFullAt, conn.ID())
 	}
+}
+
+// BuildGameState 构建当前游戏状态（用于重连）
+func (r *Room) BuildGameState() *gamev1.GameState {
+	// 转换玩家列表
+	protoPlayers := protocol.CorePlayersToProto(r.game.Players)
+
+	// 转换炸弹列表
+	protoBombs := protocol.CoreBombsToProto(r.game.Bombs)
+
+	// 转换爆炸列表
+	protoExplosions := protocol.CoreExplosionsToProto(r.game.Explosions)
+
+	// 收集地图变化
+	var tileChanges []*gamev1.TileChange
+	for _, exp := range r.game.Explosions {
+		for _, tc := range exp.TileChanges {
+			tileChanges = append(tileChanges, &gamev1.TileChange{
+				X:       int32(tc.GridX),
+				Y:       int32(tc.GridY),
+				NewType: gamev1.TileType(tc.NewType),
+			})
+		}
+	}
+
+	// 复制 lastProcessedInputSeq
+	lastProcessedSeq := make(map[int32]int32, len(r.lastProcessedInputSeq))
+	for k, v := range r.lastProcessedInputSeq {
+		lastProcessedSeq[k] = v
+	}
+
+	return &gamev1.GameState{
+		FrameId:            r.frameID,
+		Phase:              protocol.CoreGameStateToProto(int(r.state)),
+		Players:            protoPlayers,
+		Bombs:              protoBombs,
+		Explosions:         protoExplosions,
+		TileChanges:        tileChanges,
+		LastProcessedSeq:   lastProcessedSeq,
+	}
+}
+
+// ReplaceConnection 替换玩家的连接（用于重连）
+func (r *Room) ReplaceConnection(playerID int32, newConn Session) {
+	r.connections[playerID] = newConn
+	log.Printf("玩家 %d 的连接已替换", playerID)
 }
 
 const InputBufferFrames = 120

@@ -16,6 +16,8 @@ import (
 	"bomberman/pkg/core"
 	"bomberman/pkg/protocol"
 
+	"google.golang.org/protobuf/proto"
+
 	kcp "github.com/xtaci/kcp-go/v5"
 )
 
@@ -36,10 +38,11 @@ type NetworkClient struct {
 	proto      string
 
 	// 玩家信息
-	playerID  int32
-	character core.CharacterType
-	gameSeed  int64
-	tps       int32
+	playerID     int32
+	character    core.CharacterType
+	gameSeed     int64
+	tps          int32
+	sessionToken string // 会话令牌，用于重连
 
 	// 网络
 	connected bool
@@ -48,9 +51,10 @@ type NetworkClient struct {
 	wg        sync.WaitGroup
 
 	// 消息队列
-	stateChan    chan *gamev1.GameState
-	eventChan    chan *gamev1.GameEvent
-	joinRespChan chan *gamev1.JoinResponse
+	stateChan         chan *gamev1.GameState
+	eventChan         chan *gamev1.GameEvent
+	joinRespChan      chan *gamev1.JoinResponse
+	reconnectRespChan chan *gamev1.ReconnectResponse
 
 	// 发送队列
 	inputSeq        int32
@@ -78,18 +82,19 @@ func NewNetworkClient(serverAddr, proto string, character core.CharacterType) *N
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &NetworkClient{
-		serverAddr:   serverAddr,
-		proto:        proto,
-		character:    character,
-		ctx:          ctx,
-		cancel:       cancel,
-		stateChan:    make(chan *gamev1.GameState, 256),
-		eventChan:    make(chan *gamev1.GameEvent, 64),
-		joinRespChan: make(chan *gamev1.JoinResponse, 1),
-		sendChan:     make(chan []byte, 256),
-		errChan:      make(chan error, 1),
-		rttSamples:   make([]int64, rttSampleWindow),
-		statsLogger:  time.NewTicker(statsLogInterval),
+		serverAddr:        serverAddr,
+		proto:             proto,
+		character:         character,
+		ctx:               ctx,
+		cancel:            cancel,
+		stateChan:         make(chan *gamev1.GameState, 256),
+		eventChan:         make(chan *gamev1.GameEvent, 64),
+		joinRespChan:      make(chan *gamev1.JoinResponse, 1),
+		reconnectRespChan: make(chan *gamev1.ReconnectResponse, 1),
+		sendChan:          make(chan []byte, 256),
+		errChan:           make(chan error, 1),
+		rttSamples:        make([]int64, rttSampleWindow),
+		statsLogger:       time.NewTicker(statsLogInterval),
 	}
 }
 
@@ -140,6 +145,7 @@ func (nc *NetworkClient) Connect() error {
 		nc.playerID = resp.PlayerId
 		nc.gameSeed = resp.GameSeed
 		nc.tps = resp.Tps
+		nc.sessionToken = resp.SessionToken
 		log.Printf("玩家 ID: %d", nc.playerID)
 		return nil
 
@@ -198,6 +204,7 @@ func (nc *NetworkClient) Close() {
 	close(nc.stateChan)
 	close(nc.eventChan)
 	close(nc.joinRespChan)
+	close(nc.reconnectRespChan)
 	close(nc.sendChan)
 	close(nc.errChan)
 
@@ -320,6 +327,17 @@ func (nc *NetworkClient) handleMessage(data []byte) error {
 			return fmt.Errorf("解析 Pong 失败: %w", err)
 		}
 		nc.handlePong(pong)
+		return nil
+
+	case gamev1.MessageType_MESSAGE_TYPE_RECONNECT_RESPONSE:
+		resp, err := protocol.ParseReconnectResponse(pkt)
+		if err != nil {
+			return fmt.Errorf("解析重连响应失败: %w", err)
+		}
+		select {
+		case nc.reconnectRespChan <- resp:
+		default:
+		}
 		return nil
 
 	default:
@@ -639,5 +657,115 @@ func (nc *NetworkClient) logNetworkStats() {
 
 	log.Printf("[网络] RTT: %dms, 平均: %dms, 抖动: %dms, 质量: %s",
 		rtt, avg, jitter, quality)
+}
+
+// ========== 重连 ==========
+
+// Reconnect 重连到服务器
+// 返回当前游戏状态用于恢复
+func (nc *NetworkClient) Reconnect() (*gamev1.GameState, error) {
+	if nc.sessionToken == "" {
+		return nil, errors.New("没有会话令牌，无法重连")
+	}
+
+	log.Printf("正在重连到服务器...")
+
+	// 关闭旧连接但保留状态
+	nc.connected = false
+	nc.cancel()
+	if nc.conn != nil {
+		nc.conn.Close()
+	}
+	nc.wg.Wait()
+
+	// 创建新的上下文
+	ctx, cancel := context.WithCancel(context.Background())
+	nc.ctx = ctx
+	nc.cancel = cancel
+
+	// 重新建立连接
+	conn, err := nc.dial()
+	if err != nil {
+		return nil, fmt.Errorf("重连失败: %w", err)
+	}
+	nc.conn = conn
+	nc.connected = true
+
+	log.Printf("已重连到服务器: %s", conn.RemoteAddr())
+
+	// 启动接收循环
+	nc.wg.Add(1)
+	go nc.receiveLoop()
+
+	// 启动发送循环
+	nc.wg.Add(1)
+	go nc.sendLoop()
+
+	// 启动 Ping 循环
+	nc.wg.Add(1)
+	go nc.pingLoop()
+
+	// 发送重连请求
+	if err := nc.sendReconnectRequest(); err != nil {
+		nc.Close()
+		return nil, fmt.Errorf("发送重连请求失败: %w", err)
+	}
+
+	// 等待重连响应
+	select {
+	case resp := <-nc.reconnectRespChan:
+		if resp == nil {
+			nc.Close()
+			return nil, errors.New("重连响应为空")
+		}
+		if !resp.Success {
+			nc.Close()
+			return nil, fmt.Errorf("重连失败: %s", resp.ErrorMessage)
+		}
+		log.Printf("重连成功，玩家 ID: %d", nc.playerID)
+		return resp.CurrentState, nil
+
+	case err := <-nc.errChan:
+		nc.Close()
+		return nil, fmt.Errorf("重连时发生错误: %w", err)
+
+	case <-time.After(10 * time.Second):
+		nc.Close()
+		return nil, errors.New("等待重连响应超时")
+	}
+}
+
+// sendReconnectRequest 发送重连请求
+func (nc *NetworkClient) sendReconnectRequest() error {
+	req := &gamev1.ReconnectRequest{
+		SessionToken: nc.sessionToken,
+	}
+
+	payload, err := proto.Marshal(req)
+	if err != nil {
+		return err
+	}
+
+	packet := &gamev1.Packet{
+		Type:    gamev1.MessageType_MESSAGE_TYPE_RECONNECT_REQUEST,
+		Payload: payload,
+	}
+
+	data, err := protocol.MarshalPacket(packet)
+	if err != nil {
+		return err
+	}
+
+	return nc.sendMessage(data)
+}
+
+// GetSessionToken 获取会话令牌
+func (nc *NetworkClient) GetSessionToken() string {
+	return nc.sessionToken
+}
+
+// CanReconnect 检查是否可以重连
+func (nc *NetworkClient) CanReconnect() bool {
+	return nc.sessionToken != ""
 }
 

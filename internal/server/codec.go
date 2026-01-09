@@ -73,6 +73,16 @@ func DecodePacket(data []byte) (*ServerEvent, error) {
 			Pong: &PongEvent{ClientTime: pong.ClientTime, ServerTime: pong.ServerTime, ServerFrame: pong.ServerFrame},
 		}, nil
 
+	case gamev1.MessageType_MESSAGE_TYPE_RECONNECT_REQUEST:
+		req, err := protocol.ParseReconnectRequest(pkt)
+		if err != nil {
+			return nil, err
+		}
+		return &ServerEvent{
+			Kind:      EventReconnect,
+			Reconnect: &ReconnectEvent{SessionToken: req.SessionToken},
+		}, nil
+
 	default:
 		return &ServerEvent{Kind: EventUnknown}, nil
 	}

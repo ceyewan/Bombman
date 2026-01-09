@@ -6,6 +6,8 @@ import (
 	"log"
 	"sync"
 	"time"
+
+	gamev1 "bomberman/api/gen/bomberman/v1"
 )
 
 const (
@@ -230,4 +232,31 @@ func (m *RoomManager) CreateRoom() string {
 	roomID := fmt.Sprintf("room_%d", time.Now().UnixNano())
 	m.getOrCreateRoom(roomID)
 	return roomID
+}
+
+// ReconnectPlayer 玩家重连
+// 返回当前游戏状态用于恢复
+func (m *RoomManager) ReconnectPlayer(newConnID int32, playerID int32, roomID string, newConn Session) (*gamev1.GameState, error) {
+	m.roomMutex.RLock()
+	defer m.roomMutex.RUnlock()
+
+	room, exists := m.rooms[roomID]
+	if !exists {
+		return nil, fmt.Errorf("房间 %s 不存在", roomID)
+	}
+
+	// 检查玩家是否在这个房间中
+	if _, exists := room.connections[playerID]; !exists {
+		return nil, fmt.Errorf("玩家 %d 不在房间 %s 中", playerID, roomID)
+	}
+
+	// 获取当前游戏状态
+	currentState := room.BuildGameState()
+
+	// 替换连接
+	room.ReplaceConnection(playerID, newConn)
+
+	log.Printf("玩家 %d 在房间 %s 重连，新连接 ID: %d", playerID, roomID, newConnID)
+
+	return currentState, nil
 }

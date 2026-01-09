@@ -277,6 +277,9 @@ func (c *Connection) handleMessage(data []byte) error {
 	case EventPing:
 		c.server.handlePing(c, event.Ping)
 
+	case EventReconnect:
+		c.server.handleReconnect(c, event.Reconnect)
+
 	default:
 		return fmt.Errorf("未知消息类型")
 	}

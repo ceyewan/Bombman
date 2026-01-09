@@ -81,13 +81,14 @@ func NewPingPacket(clientTime int64) (*gamev1.Packet, error) {
 // ========== 服务器消息构造 ==========
 
 // NewJoinResponsePacket 构造加入响应消息包
-func NewJoinResponsePacket(success bool, playerId int32, errorMessage string, gameSeed int64, tps int32) (*gamev1.Packet, error) {
+func NewJoinResponsePacket(success bool, playerId int32, errorMessage string, gameSeed int64, tps int32, sessionToken string) (*gamev1.Packet, error) {
 	resp := &gamev1.JoinResponse{
 		Success:      success,
 		PlayerId:     playerId,
 		ErrorMessage: errorMessage,
 		GameSeed:     gameSeed,
 		Tps:          tps,
+		SessionToken: sessionToken,
 	}
 
 	payload, err := proto.Marshal(resp)
@@ -162,6 +163,25 @@ func NewPongPacket(clientTime, serverTime int64, serverFrame int32) (*gamev1.Pac
 
 	return &gamev1.Packet{
 		Type:    gamev1.MessageType_MESSAGE_TYPE_PONG,
+		Payload: payload,
+	}, nil
+}
+
+// NewReconnectResponsePacket 构造重连响应消息包
+func NewReconnectResponsePacket(success bool, errorMessage string, currentState *gamev1.GameState) (*gamev1.Packet, error) {
+	resp := &gamev1.ReconnectResponse{
+		Success:      success,
+		ErrorMessage: errorMessage,
+		CurrentState: currentState,
+	}
+
+	payload, err := proto.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return &gamev1.Packet{
+		Type:    gamev1.MessageType_MESSAGE_TYPE_RECONNECT_RESPONSE,
 		Payload: payload,
 	}, nil
 }
@@ -281,4 +301,32 @@ func ParsePong(pkt *gamev1.Packet) (*gamev1.Pong, error) {
 		return nil, err
 	}
 	return pong, nil
+}
+
+// ParseReconnectRequest 从 Packet 中解析 ReconnectRequest
+func ParseReconnectRequest(pkt *gamev1.Packet) (*gamev1.ReconnectRequest, error) {
+	if pkt.Type != gamev1.MessageType_MESSAGE_TYPE_RECONNECT_REQUEST {
+		return nil, errors.New("not a reconnect request message")
+	}
+
+	req := &gamev1.ReconnectRequest{}
+	err := proto.Unmarshal(pkt.Payload, req)
+	if err != nil {
+		return nil, err
+	}
+	return req, nil
+}
+
+// ParseReconnectResponse 从 Packet 中解析 ReconnectResponse
+func ParseReconnectResponse(pkt *gamev1.Packet) (*gamev1.ReconnectResponse, error) {
+	if pkt.Type != gamev1.MessageType_MESSAGE_TYPE_RECONNECT_RESPONSE {
+		return nil, errors.New("not a reconnect response message")
+	}
+
+	resp := &gamev1.ReconnectResponse{}
+	err := proto.Unmarshal(pkt.Payload, resp)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
 }

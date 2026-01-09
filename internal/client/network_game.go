@@ -25,6 +25,11 @@ type NetworkGameClient struct {
 
 	// 自适应参数
 	lastAdaptiveUpdate time.Time
+
+	// 重连状态
+	reconnecting bool
+	reconnectDelay time.Duration
+	lastReconnectAttempt time.Time
 }
 
 type inputFrame struct {
@@ -58,10 +63,11 @@ func NewNetworkGameClient(network *NetworkClient, controlScheme ControlScheme) (
 	game.coreGame.IsAuthoritative = false
 
 	client := &NetworkGameClient{
-		game:       game,
-		network:    network,
-		playerID:   int(network.GetPlayerID()),
-		playersMap: make(map[int]*Player),
+		game:           game,
+		network:        network,
+		playerID:       int(network.GetPlayerID()),
+		playersMap:     make(map[int]*Player),
+		reconnectDelay: 2 * time.Second, // 初始重连延迟 2 秒
 	}
 
 	return client, nil
@@ -69,8 +75,26 @@ func NewNetworkGameClient(network *NetworkClient, controlScheme ControlScheme) (
 
 // Update 更新网络游戏
 func (ngc *NetworkGameClient) Update() error {
-	// 0. 更新自适应参数（每秒一次）
 	now := time.Now()
+
+	// 0. 检查连接状态，触发重连
+	if !ngc.network.IsConnected() && !ngc.reconnecting {
+		if ngc.network.CanReconnect() {
+			// 检查是否可以尝试重连
+			if ngc.lastReconnectAttempt.IsZero() || now.Sub(ngc.lastReconnectAttempt) >= ngc.reconnectDelay {
+				go ngc.tryReconnect()
+			}
+		}
+		// 连接断开时跳过更新
+		return nil
+	}
+
+	// 0.1 如果正在重连，跳过更新
+	if ngc.reconnecting {
+		return nil
+	}
+
+	// 0. 更新自适应参数（每秒一次）
 	if now.Sub(ngc.lastAdaptiveUpdate) >= time.Second {
 		ngc.updateAdaptiveParams()
 		ngc.lastAdaptiveUpdate = now
@@ -564,5 +588,38 @@ func (ngc *NetworkGameClient) GetInputLeadFrames() int32 {
 		return DefaultInputLeadFrames
 	}
 	return ngc.calculateInputLeadFrames(rtt)
+}
+
+// ========== 重连 ==========
+
+// tryReconnect 尝试重连到服务器
+func (ngc *NetworkGameClient) tryReconnect() {
+	ngc.reconnecting = true
+	ngc.lastReconnectAttempt = time.Now()
+
+	log.Printf("连接断开，正在尝试重连...")
+
+	state, err := ngc.network.Reconnect()
+	if err != nil {
+		log.Printf("重连失败: %v", err)
+		ngc.reconnecting = false
+		// 指数退避：增加重连延迟，最大 30 秒
+		ngc.reconnectDelay = ngc.reconnectDelay * 2
+		if ngc.reconnectDelay > 30*time.Second {
+			ngc.reconnectDelay = 30 * time.Second
+		}
+		return
+	}
+
+	// 重连成功，恢复延迟
+	ngc.reconnectDelay = 2 * time.Second
+	ngc.reconnecting = false
+
+	log.Printf("重连成功！恢复游戏状态...")
+
+	// 恢复游戏状态
+	if state != nil {
+		ngc.applyServerState(state)
+	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	gamev1 "bomberman/api/gen/bomberman/v1"
 	"bomberman/pkg/protocol"
 )
 
@@ -187,4 +188,57 @@ func (s *GameServer) handlePing(conn Session, ping *PingEvent) {
 		return
 	}
 	_ = conn.Send(data)
+}
+
+// handleReconnect 处理重连请求
+func (s *GameServer) handleReconnect(conn Session, req *ReconnectEvent) {
+	if req == nil || req.SessionToken == "" {
+		s.sendReconnectResponse(conn, false, "缺少会话令牌", nil)
+		return
+	}
+
+	// 验证 Token
+	playerID, roomID, err := VerifySessionToken(req.SessionToken)
+	if err != nil {
+		log.Printf("重连失败: Token 验证失败: %v", err)
+		s.sendReconnectResponse(conn, false, "会话令牌无效或已过期", nil)
+		return
+	}
+
+	if s.roomManager == nil {
+		s.sendReconnectResponse(conn, false, "房间未初始化", nil)
+		return
+	}
+
+	// 尝试恢复会话
+	currentState, err := s.roomManager.ReconnectPlayer(conn.ID(), playerID, roomID, conn)
+	if err != nil {
+		log.Printf("重连失败: 玩家 %d: %v", playerID, err)
+		s.sendReconnectResponse(conn, false, err.Error(), nil)
+		return
+	}
+
+	// 设置连接的玩家 ID 和房间 ID
+	conn.SetPlayerID(playerID)
+	conn.SetRoomID(roomID)
+
+	log.Printf("玩家 %d 重连成功", playerID)
+	s.sendReconnectResponse(conn, true, "", currentState)
+}
+
+// sendReconnectResponse 发送重连响应
+func (s *GameServer) sendReconnectResponse(conn Session, success bool, errMsg string, currentState *gamev1.GameState) {
+	packet, err := protocol.NewReconnectResponsePacket(success, errMsg, currentState)
+	if err != nil {
+		log.Printf("构造重连响应失败: %v", err)
+		return
+	}
+	data, err := protocol.MarshalPacket(packet)
+	if err != nil {
+		log.Printf("序列化重连响应失败: %v", err)
+		return
+	}
+	if err := conn.Send(data); err != nil {
+		log.Printf("发送重连响应失败: %v", err)
+	}
 }

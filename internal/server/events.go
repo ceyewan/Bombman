@@ -8,6 +8,7 @@ const (
 	EventInput
 	EventPing
 	EventPong
+	EventReconnect
 )
 
 type InputData struct {
@@ -42,10 +43,15 @@ type PongEvent struct {
 	ServerFrame int32
 }
 
+type ReconnectEvent struct {
+	SessionToken string
+}
+
 type ServerEvent struct {
-	Kind  EventKind
-	Join  *JoinEvent
-	Input *InputEvent
-	Ping  *PingEvent
-	Pong  *PongEvent
+	Kind      EventKind
+	Join      *JoinEvent
+	Input     *InputEvent
+	Ping      *PingEvent
+	Pong      *PongEvent
+	Reconnect *ReconnectEvent
 }

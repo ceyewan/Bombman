@@ -67,6 +67,11 @@ message Ping {
   int64 client_time = 1; // 客户端时间戳（毫秒）
 }
 
+// 重连请求，用于断线后恢复会话
+message ReconnectRequest {
+  string session_token = 1; // 会话令牌（JWT）
+}
+
 // ========== 服务器消息 ==========
 
 // 加入游戏响应，包含玩家 ID 和初始游戏配置
@@ -78,6 +83,9 @@ message JoinResponse {
   // 初始游戏配置
   int64 game_seed = 4; // 地图随机种子
   int32 tps = 5; // 服务器 TPS，例如 60 Hz
+
+  // 会话信息（用于重连）
+  string session_token = 10; // 会话令牌（JWT），5 分钟有效
 }
 
 // 完整游戏状态（定期发送或客户端请求）
@@ -171,6 +179,15 @@ message Pong {
   int32 server_frame = 3; // 当前服务器帧号
 }
 
+// 重连响应，包含完整游戏状态用于恢复
+message ReconnectResponse {
+  bool success = 1;
+  string error_message = 2;
+
+  // 完整游戏状态（用于恢复）
+  GameState current_state = 3;
+}
+
 // ========== 游戏事件（可选，用于重要事件通知） ==========
 
 message GameEvent {
@@ -234,10 +251,12 @@ enum MessageType {
   MESSAGE_TYPE_JOIN_REQUEST = 1;
   MESSAGE_TYPE_CLIENT_INPUT = 2;
   MESSAGE_TYPE_PING = 3;
+  MESSAGE_TYPE_RECONNECT_REQUEST = 4;
 
   // 服务器 -> 客户端
   MESSAGE_TYPE_JOIN_RESPONSE = 10;
   MESSAGE_TYPE_GAME_STATE = 11;
   MESSAGE_TYPE_GAME_EVENT = 12;
   MESSAGE_TYPE_PONG = 13;
+  MESSAGE_TYPE_RECONNECT_RESPONSE = 14;
 }
