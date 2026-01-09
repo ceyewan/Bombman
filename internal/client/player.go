@@ -5,6 +5,7 @@ import (
 
 	"bomberman/pkg/ai"
 	"bomberman/pkg/core"
+
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 )
@@ -24,6 +25,10 @@ type Player struct {
 	aiController *ai.AIController
 	isLocal      bool
 	smoother     *RemoteSmoother
+
+	// 本地玩家渲染/模拟分离
+	renderX, renderY  float64 // 渲染位置（平滑跟随模拟位置）
+	renderInitialized bool    // 是否已初始化渲染位置
 }
 
 // NewPlayer 创建新玩家
@@ -65,6 +70,53 @@ func (p *Player) Update(controlScheme ControlScheme, coreGame *core.Game, curren
 
 	// 更新动画（使用固定时间步长）
 	p.renderer.updateAnimation(core.FrameSeconds)
+}
+
+// UpdateAnimation 仅更新动画（用于网络客户端）
+func (p *Player) UpdateAnimation(deltaTime float64) {
+	p.renderer.updateAnimation(deltaTime)
+
+	// 本地玩家更新渲染位置（平滑跟随模拟位置）
+	if p.isLocal {
+		p.updateRenderPosition()
+	}
+}
+
+// updateRenderPosition 更新渲染位置，平滑跟随模拟位置
+func (p *Player) updateRenderPosition() {
+	if !p.renderInitialized {
+		p.renderX = p.corePlayer.X
+		p.renderY = p.corePlayer.Y
+		p.renderInitialized = true
+		return
+	}
+
+	// 计算误差
+	dx := p.corePlayer.X - p.renderX
+	dy := p.corePlayer.Y - p.renderY
+	distSq := dx*dx + dy*dy
+
+	// 阈值（平方）：超过此值则瞬间拉回，否则平滑跟随
+	const snapThresholdSq = 64.0 // 8 像素
+
+	if distSq > snapThresholdSq {
+		// 大误差：瞬间跳到模拟位置
+		p.renderX = p.corePlayer.X
+		p.renderY = p.corePlayer.Y
+	} else if distSq > 0.01 { // 避免微小抖动
+		// 小误差：平滑跟随（每帧移动 30% 差距）
+		const followFactor = 0.3
+		p.renderX += dx * followFactor
+		p.renderY += dy * followFactor
+	}
+}
+
+// GetRenderPosition 获取渲染位置
+func (p *Player) GetRenderPosition() (float64, float64) {
+	if p.isLocal && p.renderInitialized {
+		return p.renderX, p.renderY
+	}
+	return p.corePlayer.X, p.corePlayer.Y
 }
 
 // handleInput 处理键盘输入
@@ -129,12 +181,15 @@ func (p *Player) Draw(screen *ebiten.Image) {
 	renderer := p.renderer
 	player := p.corePlayer
 
+	// 获取渲染位置（本地玩家使用平滑位置）
+	renderX, renderY := p.GetRenderPosition()
+
 	// 玩家尺寸
 	size := float32(player.Width)
 	offset := float32(6) / 2 // (TileSize - PlayerWidth) / 2
 
-	px := float32(player.X) - offset
-	py := float32(player.Y) - offset
+	px := float32(renderX) - offset
+	py := float32(renderY) - offset
 
 	// 根据方向调整绘制
 	var drawX, drawY float32
@@ -241,11 +296,6 @@ func (p *Player) ID() int                       { return p.corePlayer.ID }
 func (p *Player) X() float64                    { return p.corePlayer.X }
 func (p *Player) Y() float64                    { return p.corePlayer.Y }
 func (p *Player) Character() core.CharacterType { return p.corePlayer.Character }
-
-// UpdateAnimation 更新动画（不处理输入）
-func (p *Player) UpdateAnimation(deltaTime float64) {
-	p.renderer.updateAnimation(deltaTime)
-}
 
 // NewPlayerFromCore 从 core.Player 创建 Player
 func NewPlayerFromCore(corePlayer *core.Player) *Player {
