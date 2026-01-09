@@ -17,6 +17,7 @@ type NetworkGameClient struct {
 	playerID   int
 	playersMap map[int]*Player
 	inputHistory []inputFrame
+	pendingInputs []predictedInput
 }
 
 type inputFrame struct {
@@ -24,6 +25,12 @@ type inputFrame struct {
 	up, down    bool
 	left, right bool
 	bomb        bool
+}
+
+type predictedInput struct {
+	frameID     int32
+	up, down    bool
+	left, right bool
 }
 
 // NewNetworkGameClient 创建联机游戏客户端
@@ -119,6 +126,10 @@ func (ngc *NetworkGameClient) applyServerState(state *gamev1.GameState) {
 		corePlayer.Character = protocol.ProtoCharacterTypeToCore(protoPlayer.Character)
 		corePlayer.NextPlacementFrame = int32(protoPlayer.NextPlacementFrame)
 		corePlayer.MaxBombs = int(protoPlayer.MaxBombs)
+
+		if playerID == ngc.playerID {
+			ngc.reconcileLocalPlayer(corePlayer, state.FrameId)
+		}
 	}
 
 	// 移除已不存在的玩家
@@ -182,6 +193,11 @@ func (ngc *NetworkGameClient) applyTileChanges(changes []*gamev1.TileChange) {
 
 // handleInput 发送输入到服务器
 func (ngc *NetworkGameClient) handleInput() {
+	// 游戏结束时不发送输入
+	if ngc.game.gameOver {
+		return
+	}
+
 	localPlayer := ngc.playersMap[ngc.playerID]
 	if localPlayer == nil || localPlayer.corePlayer.Dead {
 		return
@@ -211,6 +227,8 @@ func (ngc *NetworkGameClient) handleInput() {
 		}
 	}
 
+	ngc.applyPredictedInput(targetFrame, up, down, left, right)
+
 	start := 0
 	if len(ngc.inputHistory) > InputSendWindow {
 		start = len(ngc.inputHistory) - InputSendWindow
@@ -227,6 +245,68 @@ func (ngc *NetworkGameClient) handleInput() {
 		})
 	}
 	ngc.network.SendInputBatch(inputs)
+}
+
+func (ngc *NetworkGameClient) applyPredictedInput(frameID int32, up, down, left, right bool) {
+	if len(ngc.pendingInputs) > 0 && ngc.pendingInputs[len(ngc.pendingInputs)-1].frameID == frameID {
+		last := &ngc.pendingInputs[len(ngc.pendingInputs)-1]
+		last.up, last.down, last.left, last.right = up, down, left, right
+	} else {
+		ngc.pendingInputs = append(ngc.pendingInputs, predictedInput{
+			frameID: frameID,
+			up:      up,
+			down:    down,
+			left:    left,
+			right:   right,
+		})
+	}
+
+	local := ngc.playersMap[ngc.playerID]
+	if local == nil {
+		return
+	}
+
+	core.ApplyInput(ngc.game.coreGame, ngc.playerID, core.Input{
+		Up:    up,
+		Down:  down,
+		Left:  left,
+		Right: right,
+		Bomb:  false,
+	}, frameID)
+}
+
+func (ngc *NetworkGameClient) reconcileLocalPlayer(corePlayer *core.Player, serverFrame int32) {
+	if corePlayer == nil {
+		return
+	}
+
+	if len(ngc.pendingInputs) == 0 {
+		return
+	}
+
+	// 丢弃已经被服务器帧覆盖的输入
+	idx := 0
+	for idx < len(ngc.pendingInputs) && ngc.pendingInputs[idx].frameID <= serverFrame {
+		idx++
+	}
+	if idx > 0 {
+		ngc.pendingInputs = ngc.pendingInputs[idx:]
+	}
+
+	if len(ngc.pendingInputs) == 0 {
+		return
+	}
+
+	// 从权威状态重放未确认的移动输入
+	for _, in := range ngc.pendingInputs {
+		core.ApplyInput(ngc.game.coreGame, ngc.playerID, core.Input{
+			Up:    in.up,
+			Down:  in.down,
+			Left:  in.left,
+			Right: in.right,
+			Bomb:  false,
+		}, in.frameID)
+	}
 }
 
 // handleNetworkEvents 处理网络事件
