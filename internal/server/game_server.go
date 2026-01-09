@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	gamev1 "bomberman/api/gen/bomberman/v1"
+	"bomberman/pkg/protocol"
 )
 
 const (
@@ -27,35 +27,35 @@ const (
 
 // GameServer 游戏服务器
 type GameServer struct {
-room *Room
+	roomManager *RoomManager
 
-// 配置
-enableAI bool
+	// 配置
+	enableAI bool
 
-// 网络
-listener ServerListener
-addr     string
-proto    string
+	// 网络
+	listener ServerListener
+	addr     string
+	proto    string
 
-// 控制
-ctx      context.Context
-cancel   context.CancelFunc
-wg       sync.WaitGroup
-shutdown chan struct{}
+	// 控制
+	ctx      context.Context
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+	shutdown chan struct{}
 }
 
 // NewGameServer 创建新的游戏服务器
 func NewGameServer(addr, proto string, enableAI bool) *GameServer {
-ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
 
-return &GameServer{
-addr:     addr,                // 监听地址
-proto:    proto,               // 监听协议
-enableAI: enableAI,            // 是否启用 AI
-ctx:      ctx,                 // 上下文
-cancel:   cancel,              // 取消函数
-shutdown: make(chan struct{}), // 关闭信号
-}
+	return &GameServer{
+		addr:     addr,                // 监听地址
+		proto:    proto,               // 监听协议
+		enableAI: enableAI,            // 是否启用 AI
+		ctx:      ctx,                 // 上下文
+		cancel:   cancel,              // 取消函数
+		shutdown: make(chan struct{}), // 关闭信号
+	}
 }
 
 // Start 启动服务器
@@ -69,13 +69,10 @@ func (s *GameServer) Start() error {
 	}
 	s.listener = listener
 
-log.Printf("服务器监听中: %s", s.addr)
+	log.Printf("服务器监听中: %s", s.addr)
 
-s.room = NewRoom(s.ctx, s.enableAI)
-
-// 启动房间循环
-s.wg.Add(1)
-go s.room.Run(&s.wg)
+	s.roomManager = NewRoomManager(s.ctx, s.enableAI)
+	s.roomManager.Run(&s.wg)
 
 	// 启动连接接受循环
 	s.wg.Add(1)
@@ -95,8 +92,8 @@ func (s *GameServer) Shutdown() {
 	// 取消上下文
 	s.cancel()
 
-	if s.room != nil {
-		s.room.Shutdown()
+	if s.roomManager != nil {
+		s.roomManager.Shutdown()
 	}
 
 	// 关闭监听器
@@ -148,25 +145,45 @@ func (s *GameServer) acceptLoop() {
 }
 
 // handleJoinRequest 处理加入请求
-func (s *GameServer) handleJoinRequest(conn *Connection, req *gamev1.JoinRequest) error {
-	if s.room == nil {
+func (s *GameServer) handleJoinRequest(conn Session, req *JoinEvent) error {
+	if s.roomManager == nil {
 		return fmt.Errorf("房间未初始化")
 	}
-	return s.room.Join(conn, req)
+	return s.roomManager.Join(conn, *req)
 }
 
 // handleClientInput 处理客户端输入
-func (s *GameServer) handleClientInput(playerID int32, input *gamev1.ClientInput) {
-	if s.room == nil {
+func (s *GameServer) handleClientInput(playerID int32, input *InputEvent) {
+	if s.roomManager == nil {
 		return
 	}
-	s.room.EnqueueInput(playerID, input)
+	s.roomManager.EnqueueInput(playerID, *input)
 }
 
 // removePlayer 移除玩家
 func (s *GameServer) removePlayer(playerID int32) {
-	if s.room == nil {
+	if s.roomManager == nil {
 		return
 	}
-	s.room.Leave(playerID)
+	s.roomManager.Leave(playerID)
+}
+
+func (s *GameServer) handlePing(conn Session, ping *PingEvent) {
+	if ping == nil {
+		return
+	}
+	serverFrame := int32(0)
+	if s.roomManager != nil {
+		serverFrame = s.roomManager.CurrentFrame()
+	}
+
+	packet, err := protocol.NewPongPacket(ping.ClientTime, time.Now().UnixMilli(), serverFrame)
+	if err != nil {
+		return
+	}
+	data, err := protocol.MarshalPacket(packet)
+	if err != nil {
+		return
+	}
+	_ = conn.Send(data)
 }

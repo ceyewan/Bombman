@@ -12,14 +12,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	gamev1 "bomberman/api/gen/bomberman/v1"
 	"bomberman/pkg/protocol"
 )
 
 const (
-	MaxPacketSize = 4096             // 最大消息大小
-	readTimeout   = 5 * time.Second  // 读取超时
-	writeTimeout  = 1 * time.Second  // 写入超时
+	MaxPacketSize = 4096            // 最大消息大小
+	readTimeout   = 5 * time.Second // 读取超时
+	writeTimeout  = 1 * time.Second // 写入超时
 )
 
 var ErrSendQueueFull = errors.New("发送队列满")
@@ -35,11 +34,15 @@ type Connection struct {
 	closeCh  chan struct{}
 	closed   bool
 	closeMu  sync.Mutex
+
+	lastRecvTime atomic.Value
+	lastPingTime atomic.Value
+	rtt          atomic.Int64
 }
 
 // NewConnection 创建新连接，连接到服务器上
 func NewConnection(conn net.Conn, server *GameServer) *Connection {
-	return &Connection{
+	c := &Connection{
 		conn:     conn,
 		server:   server,
 		playerID: -1,                     // -1 表示未分配
@@ -47,6 +50,9 @@ func NewConnection(conn net.Conn, server *GameServer) *Connection {
 		closeCh:  make(chan struct{}),
 		closed:   false,
 	}
+	c.lastRecvTime.Store(time.Now())
+	c.lastPingTime.Store(time.Time{})
+	return c
 }
 
 // Handle 处理连接
@@ -54,6 +60,9 @@ func (c *Connection) Handle(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	log.Printf("玩家 %d: 连接处理开始", c.getPlayerID())
+
+	wg.Add(1)
+	go c.startHeartbeat(ctx, wg)
 
 	// 启动发送循环
 	wg.Add(1)
@@ -218,6 +227,7 @@ func (c *Connection) receiveLoop(ctx context.Context, wg *sync.WaitGroup) {
 			}
 
 			// 处理消息
+			c.onMessageReceived()
 			if err := c.handleMessage(data); err != nil {
 				log.Printf("玩家 %d: 处理消息失败: %v", c.getPlayerID(), err)
 			}
@@ -227,31 +237,34 @@ func (c *Connection) receiveLoop(ctx context.Context, wg *sync.WaitGroup) {
 
 // handleMessage 处理接收到的消息
 func (c *Connection) handleMessage(data []byte) error {
-	// 反序列化
-	packet, err := protocol.Unmarshal(data)
+	event, err := DecodePacket(data)
 	if err != nil {
 		return fmt.Errorf("反序列化失败: %w", err)
 	}
 
-	// 根据消息类型分发
-	switch payload := packet.Payload.(type) {
-	case *gamev1.GamePacket_Input:
-		// 客户端输入
-		c.server.handleClientInput(c.getPlayerID(), payload.Input)
-
-	case *gamev1.GamePacket_JoinReq:
-		// 加入请求
+	switch event.Kind {
+	case EventJoin:
 		if c.getPlayerID() >= 0 {
 			log.Printf("玩家 %d: 重复加入请求", c.getPlayerID())
 			return fmt.Errorf("玩家已加入")
 		}
-		if err := c.server.handleJoinRequest(c, payload.JoinReq); err != nil {
+		if err := c.server.handleJoinRequest(c, event.Join); err != nil {
 			return fmt.Errorf("处理加入请求失败: %w", err)
 		}
 		log.Printf("玩家 %d: 加入成功", c.getPlayerID())
 
+	case EventInput:
+		event.Input.PlayerID = c.getPlayerID()
+		c.server.handleClientInput(c.getPlayerID(), event.Input)
+
+	case EventPing:
+		c.server.handlePing(c, event.Ping)
+
+	case EventPong:
+		c.handlePong(event.Pong)
+
 	default:
-		return fmt.Errorf("未知消息类型: %T", payload)
+		return fmt.Errorf("未知消息类型")
 	}
 
 	return nil
@@ -271,4 +284,67 @@ func (c *Connection) getPlayerID() int32 {
 
 func (c *Connection) setPlayerID(playerID int32) {
 	atomic.StoreInt32(&c.playerID, playerID)
+}
+
+func (c *Connection) ID() int32 {
+	return c.getPlayerID()
+}
+
+func (c *Connection) SetPlayerID(playerID int32) {
+	c.setPlayerID(playerID)
+}
+
+const (
+	heartbeatInterval = 5 * time.Second
+	heartbeatTimeout  = 15 * time.Second
+)
+
+func (c *Connection) startHeartbeat(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	ticker := time.NewTicker(heartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.closeCh:
+			return
+		case <-ticker.C:
+			lastRecv, _ := c.lastRecvTime.Load().(time.Time)
+			if !lastRecv.IsZero() && time.Since(lastRecv) > heartbeatTimeout {
+				log.Printf("玩家 %d: 心跳超时", c.getPlayerID())
+				c.Close()
+				return
+			}
+			c.sendPing()
+		}
+	}
+}
+
+func (c *Connection) sendPing() {
+	packet, err := protocol.NewPingPacket(time.Now().UnixMilli())
+	if err != nil {
+		return
+	}
+	data, err := protocol.MarshalPacket(packet)
+	if err != nil {
+		return
+	}
+	c.lastPingTime.Store(time.Now())
+	_ = c.Send(data)
+}
+
+func (c *Connection) handlePong(pong *PongEvent) {
+	c.lastRecvTime.Store(time.Now())
+	if pong == nil || pong.ClientTime <= 0 {
+		return
+	}
+	rtt := time.Now().UnixMilli() - pong.ClientTime
+	c.rtt.Store(rtt)
+}
+
+func (c *Connection) onMessageReceived() {
+	c.lastRecvTime.Store(time.Now())
 }

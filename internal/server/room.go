@@ -26,9 +26,9 @@ type Room struct {
 	enableAI      bool
 	aiControllers map[int32]*ai.AIController
 
-	connections     map[int32]*Connection
+	connections     map[int32]Session
 	nextPlayerID    int32
-	inputQueue      map[int32]*gamev1.ClientInput
+	inputQueue      map[int32]InputEvent
 	sendQueueFullAt map[int32]time.Time
 
 	// 客户端预测支持：记录每个玩家最后处理的输入序号
@@ -40,14 +40,14 @@ type Room struct {
 }
 
 type joinRequest struct {
-	conn   *Connection
-	req    *gamev1.JoinRequest
+	conn   Session
+	req    JoinEvent
 	respCh chan error
 }
 
 type inputEvent struct {
 	playerID int32
-	input    *gamev1.ClientInput
+	input    InputEvent
 }
 
 func NewRoom(parent context.Context, enableAI bool) *Room {
@@ -56,14 +56,14 @@ func NewRoom(parent context.Context, enableAI bool) *Room {
 	return &Room{
 		ctx:                   ctx,
 		cancel:                cancel,
-		game:                  core.NewGame(),
+		game:                  core.NewGame(0),
 		frameID:               0,
 		state:                 StateWaiting,
 		enableAI:              enableAI,
 		aiControllers:         make(map[int32]*ai.AIController),
-		connections:           make(map[int32]*Connection),
+		connections:           make(map[int32]Session),
 		nextPlayerID:          1,
-		inputQueue:            make(map[int32]*gamev1.ClientInput),
+		inputQueue:            make(map[int32]InputEvent),
 		sendQueueFullAt:       make(map[int32]time.Time),
 		lastProcessedInputSeq: make(map[int32]int32),
 		joinCh:                make(chan joinRequest),
@@ -106,7 +106,11 @@ func (r *Room) Shutdown() {
 	r.cancel()
 }
 
-func (r *Room) Join(conn *Connection, req *gamev1.JoinRequest) error {
+func (r *Room) CurrentFrame() int32 {
+	return r.frameID
+}
+
+func (r *Room) Join(conn Session, req JoinEvent) error {
 	respCh := make(chan error, 1)
 
 	select {
@@ -123,7 +127,7 @@ func (r *Room) Join(conn *Connection, req *gamev1.JoinRequest) error {
 	}
 }
 
-func (r *Room) EnqueueInput(playerID int32, input *gamev1.ClientInput) {
+func (r *Room) EnqueueInput(playerID int32, input InputEvent) {
 	select {
 	case <-r.ctx.Done():
 		return
@@ -175,7 +179,7 @@ func (r *Room) applyInputs() {
 	}
 
 	inputs := r.inputQueue
-	r.inputQueue = make(map[int32]*gamev1.ClientInput, len(inputs))
+	r.inputQueue = make(map[int32]InputEvent, len(inputs))
 
 	for playerID, input := range inputs {
 		r.applyInput(playerID, input)
@@ -186,16 +190,17 @@ func (r *Room) applyInputs() {
 	}
 }
 
-func (r *Room) applyInput(playerID int32, input *gamev1.ClientInput) {
-	if input == nil {
+func (r *Room) applyInput(playerID int32, input InputEvent) {
+	if len(input.Inputs) == 0 {
 		return
 	}
+	last := input.Inputs[len(input.Inputs)-1]
 	ci := core.Input{
-		Up:    input.Up,
-		Down:  input.Down,
-		Left:  input.Left,
-		Right: input.Right,
-		Bomb:  input.Bomb,
+		Up:    last.Up,
+		Down:  last.Down,
+		Left:  last.Left,
+		Right: last.Right,
+		Bomb:  last.Bomb,
 	}
 
 	// ApplyInput 现在需要帧号而不是 deltaTime
@@ -217,7 +222,12 @@ func (r *Room) handleJoin(req joinRequest) {
 	}
 
 	// 转换角色类型
-	characterType := protocol.ProtoCharacterTypeToCore(req.req.CharacterType)
+	// 注意：新 Proto 使用 character_id (int32) 而不是 character_type (枚举)
+	// ID 到 CharacterType 的映射：0=White, 1=Black, 2=Red, 3=Blue
+	characterType := core.CharacterType(req.req.CharacterID - 1)
+	if req.req.CharacterID <= 0 {
+		characterType = core.CharacterWhite // 默认白色
+	}
 
 	// 分配玩家 ID
 	playerID := r.nextPlayerID
@@ -228,24 +238,36 @@ func (r *Room) handleJoin(req joinRequest) {
 
 	// 创建玩家
 	player := core.NewPlayer(int(playerID), x, y, characterType)
-	player.IsSimulated = false // 服务器直接驱动
 
 	// 添加到游戏
 	r.game.AddPlayer(player)
 
 	// 保存连接
-	req.conn.setPlayerID(playerID)
+	req.conn.SetPlayerID(playerID)
 	r.connections[playerID] = req.conn
 
-	// 构造游戏开始消息
-	initialMap := protocol.CoreMapToProto(r.game.Map)
-	packet := protocol.NewGameStart(playerID, initialMap)
-	data, err := protocol.Marshal(packet)
+	// 发送 JoinResponse（包含玩家ID和游戏配置）
+	resp := &gamev1.JoinResponse{
+		Success:  true,
+		PlayerId: playerID,
+		GameSeed: r.game.Seed,
+		Tps:      int32(core.TPS),
+	}
+	packet, err := protocol.NewJoinResponsePacket(
+		resp.Success,
+		resp.PlayerId,
+		"",
+		resp.GameSeed,
+		resp.Tps,
+	)
 	if err != nil {
-		r.removePlayerByID(playerID)
-		delete(r.connections, playerID)
-		req.conn.setPlayerID(-1)
-		req.respCh <- fmt.Errorf("序列化游戏开始消息失败: %w", err)
+		req.respCh <- fmt.Errorf("构造加入响应失败: %w", err)
+		return
+	}
+
+	data, err := protocol.MarshalPacket(packet)
+	if err != nil {
+		req.respCh <- fmt.Errorf("序列化加入响应失败: %w", err)
 		return
 	}
 
@@ -253,7 +275,7 @@ func (r *Room) handleJoin(req joinRequest) {
 	if err := req.conn.Send(data); err != nil {
 		r.removePlayerByID(playerID)
 		delete(r.connections, playerID)
-		req.conn.setPlayerID(-1)
+		req.conn.SetPlayerID(-1)
 		req.respCh <- fmt.Errorf("发送游戏开始消息失败: %w", err)
 		return
 	}
@@ -299,12 +321,20 @@ func (r *Room) handleLeave(playerID int32) {
 
 	log.Printf("玩家 %d 离开，当前玩家数: %d", playerID, len(r.connections))
 
-	// 广播玩家离开消息
-	packet := protocol.NewPlayerLeave(playerID)
-	data, _ := protocol.Marshal(packet)
-
-	for _, c := range r.connections {
-		c.Send(data)
+	// 广播玩家离开事件
+	event := &gamev1.GameEvent{
+		Event: &gamev1.GameEvent_PlayerLeft{
+			PlayerLeft: &gamev1.PlayerLeftEvent{
+				PlayerId: playerID,
+			},
+		},
+	}
+	packet, err := protocol.NewGameEventPacket(r.frameID, event)
+	if err == nil {
+		data, _ := protocol.MarshalPacket(packet)
+		for _, c := range r.connections {
+			c.Send(data)
+		}
 	}
 
 	if len(r.game.Players) == 0 && r.state == StateRunning {
@@ -327,14 +357,14 @@ func (r *Room) handleGameOver(winnerID int32) {
 
 func (r *Room) resetRoom() {
 	r.closeAllConnections(false)
-	r.game = core.NewGame()
+	r.game = core.NewGame(0)
 	r.frameID = 0
 	r.state = StateWaiting
 	r.resetAt = time.Time{}
 	r.nextPlayerID = 1
 	r.aiControllers = make(map[int32]*ai.AIController)
-	r.connections = make(map[int32]*Connection)
-	r.inputQueue = make(map[int32]*gamev1.ClientInput)
+	r.connections = make(map[int32]Session)
+	r.inputQueue = make(map[int32]InputEvent)
 	r.sendQueueFullAt = make(map[int32]time.Time)
 	r.lastProcessedInputSeq = make(map[int32]int32)
 }
@@ -359,21 +389,35 @@ func (r *Room) broadcastState() {
 	// 转换爆炸列表
 	protoExplosions := protocol.CoreExplosionsToProto(r.game.Explosions)
 
-	// 服务器当前时间（毫秒）
-	serverTimeMs := time.Now().UnixMilli()
+	// 收集地图变化（从爆炸中收集）
+	var tileChanges []*gamev1.TileChange
+	for _, exp := range r.game.Explosions {
+		for _, tc := range exp.TileChanges {
+			tileChanges = append(tileChanges, &gamev1.TileChange{
+				X:       int32(tc.GridX),
+				Y:       int32(tc.GridY),
+				NewType: gamev1.TileType(tc.NewType),
+			})
+		}
+	}
 
-	// 构造 ServerState 消息（带客户端预测支持）
-	packet := protocol.NewServerStateWithMeta(
+	// 构造 GameState 消息（使用帧！）
+	packet, err := protocol.NewGameStatePacket(
 		r.frameID,
+		protocol.CoreGameStateToProto(int(r.state)),
 		protoPlayers,
 		protoBombs,
 		protoExplosions,
+		tileChanges,
 		r.lastProcessedInputSeq,
-		serverTimeMs,
 	)
+	if err != nil {
+		log.Printf("构造游戏状态失败: %v", err)
+		return
+	}
 
 	// 序列化
-	data, err := protocol.Marshal(packet)
+	data, err := protocol.MarshalPacket(packet)
 	if err != nil {
 		log.Printf("序列化状态失败: %v", err)
 		return
@@ -386,18 +430,18 @@ func (r *Room) broadcastState() {
 				r.handleSendQueueFull(conn)
 				continue
 			}
-			log.Printf("发送状态到玩家 %d 失败: %v", conn.getPlayerID(), err)
+			log.Printf("发送状态到玩家 %d 失败: %v", conn.ID(), err)
 			conn.Close()
 			continue
 		}
-		delete(r.sendQueueFullAt, conn.getPlayerID())
+		delete(r.sendQueueFullAt, conn.ID())
 	}
 }
 
 const sendQueueFullGrace = 2 * time.Second
 
-func (r *Room) handleSendQueueFull(conn *Connection) {
-	playerID := conn.getPlayerID()
+func (r *Room) handleSendQueueFull(conn Session) {
+	playerID := conn.ID()
 	if playerID < 0 {
 		return
 	}
@@ -417,16 +461,29 @@ func (r *Room) handleSendQueueFull(conn *Connection) {
 }
 
 func (r *Room) broadcastGameOver(winnerID int32) {
-	packet := protocol.NewGameOver(winnerID)
-	data, err := protocol.Marshal(packet)
+	// 广播游戏结束事件
+	event := &gamev1.GameEvent{
+		Event: &gamev1.GameEvent_GameOver{
+			GameOver: &gamev1.GameOverEvent{
+				WinnerId: winnerID,
+			},
+		},
+	}
+	packet, err := protocol.NewGameEventPacket(r.frameID, event)
 	if err != nil {
-		log.Printf("序列化游戏结束消息失败: %v", err)
+		log.Printf("构造游戏结束事件失败: %v", err)
+		return
+	}
+
+	data, err := protocol.MarshalPacket(packet)
+	if err != nil {
+		log.Printf("序列化游戏结束事件失败: %v", err)
 		return
 	}
 
 	for _, conn := range r.connections {
 		if err := conn.Send(data); err != nil {
-			log.Printf("发送游戏结束到玩家 %d 失败: %v", conn.getPlayerID(), err)
+			log.Printf("发送游戏结束到玩家 %d 失败: %v", conn.ID(), err)
 		}
 	}
 }
@@ -518,12 +575,6 @@ func (r *Room) tryFillWithAI() {
 		charType := availableChars[(playerID-1)%int32(len(availableChars))]
 
 		player := core.NewPlayer(int(playerID), x, y, charType)
-		player.IsSimulated = true // 在 Server 端这也是 Simulated? 不，这里 IsSimulated 含义有点混乱
-		// IsSimulated 应该主要用于客户端区分本地玩家和远程/AI玩家
-		// 在服务端，所有 Player 都是数据。
-		// 为了保持一致，先设为 true，尽管服务端不通过 handleInput 控制它
-		// 其实在服务端 core.Player 的 IsSimulated 字段没啥大用，除非我们复用 createLocalGame 的逻辑
-		player.IsSimulated = true
 
 		r.game.AddPlayer(player)
 
