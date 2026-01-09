@@ -23,19 +23,34 @@ func ApplyInput(game *Game, playerID int, input Input, currentFrame int32) bool 
 
 	// 速度已经是像素/帧，直接使用
 	speed := player.Speed
+	moveX := 0.0
+	moveY := 0.0
 
-	// 处理移动
 	if input.Up {
-		player.Move(0, -speed, game)
+		moveY -= speed
 	}
 	if input.Down {
-		player.Move(0, speed, game)
+		moveY += speed
 	}
 	if input.Left {
-		player.Move(-speed, 0, game)
+		moveX -= speed
 	}
 	if input.Right {
-		player.Move(speed, 0, game)
+		moveX += speed
+	}
+
+	// 斜向移动时进行归一化，避免速度变快
+	if moveX != 0 && moveY != 0 {
+		moveX *= 0.70710678
+		moveY *= 0.70710678
+	}
+
+	// 保持单轴移动以兼容拐角修正逻辑
+	if moveY != 0 {
+		player.Move(0, moveY, game)
+	}
+	if moveX != 0 {
+		player.Move(moveX, 0, game)
 	}
 
 	// 处理炸弹
@@ -50,6 +65,7 @@ func ApplyInput(game *Game, playerID int, input Input, currentFrame int32) bool 
 	return false
 }
 
+// 根据玩家ID获取玩家对象
 func getPlayerByID(game *Game, playerID int) *Player {
 	for _, player := range game.Players {
 		if player.ID == playerID {

@@ -6,32 +6,19 @@ type Game struct {
 	Players         []*Player
 	Bombs           []*Bomb
 	Explosions      []*Explosion
-	IsAuthoritative bool // 是否由于权威逻辑（控制爆炸、伤害判定等）
+	IsAuthoritative bool  // 是否由于权威逻辑（控制爆炸、伤害判定等）
 	CurrentFrame    int32 // 当前帧号
 	Seed            int64 // 随机种子（用于确定性）
 }
 
 // NewGame 创建新游戏
-func NewGame() *Game {
+func NewGame(seed int64) *Game {
 	return &Game{
-		Map:             NewGameMap(),
+		Map:             NewGameMap(seed),
 		Players:         make([]*Player, 0),
 		Bombs:           make([]*Bomb, 0),
 		Explosions:      make([]*Explosion, 0),
 		IsAuthoritative: true, // 默认开启权威逻辑（单机模式）
-		CurrentFrame:    0,
-		Seed:            0,
-	}
-}
-
-// NewGameWithSeed 使用指定种子创建新游戏
-func NewGameWithSeed(seed int64) *Game {
-	return &Game{
-		Map:             NewGameMapWithSeed(seed),
-		Players:         make([]*Player, 0),
-		Bombs:           make([]*Bomb, 0),
-		Explosions:      make([]*Explosion, 0),
-		IsAuthoritative: true,
 		CurrentFrame:    0,
 		Seed:            seed,
 	}
@@ -66,18 +53,21 @@ func (g *Game) Update() {
 // updateBombs 更新所有炸弹
 // 注意：在非权威模式（网络客户端）下，炸弹由服务器同步控制，不应本地更新
 func (g *Game) updateBombs() {
-	// 非权威模式：炸弹生命周期由服务器完全控制
-	if !g.IsAuthoritative {
-		return
-	}
-
 	// 收集需要爆炸的炸弹
 	explodingBombs := make([]*Bomb, 0)
 
 	for _, bomb := range g.Bombs {
-		if bomb.Update() {
-			explodingBombs = append(explodingBombs, bomb)
+		if bomb.Update(g.CurrentFrame) {
+			if g.IsAuthoritative {
+				explodingBombs = append(explodingBombs, bomb)
+			} else {
+				// TODO： 非权威模式下，炸弹爆炸由服务器同步控制，可以做一些视觉效果处理
+			}
 		}
+	}
+
+	if !g.IsAuthoritative {
+		return // 客户端不处理物理爆炸、连锁、伤害
 	}
 
 	// 处理爆炸（可能触发连锁）
@@ -106,7 +96,7 @@ func (g *Game) explodeBomb(bomb *Bomb) {
 	cells := bomb.GetExplosionCells(g.Map)
 
 	// 创建爆炸效果
-	explosion := NewExplosion(bomb.X, bomb.Y, bomb.ExplosionRange, g.CurrentFrame, bomb.OwnerID)
+	explosion := NewExplosion(bomb, g.CurrentFrame)
 	// 将 GridPos 转换为内部 Cells 格式
 	explosion.Cells = make([]GridPos, len(cells))
 	copy(explosion.Cells, cells)
@@ -116,12 +106,12 @@ func (g *Game) explodeBomb(bomb *Bomb) {
 
 	// 炸毁砖块，记录变化
 	for _, cell := range cells {
-		if g.Map.GetTile(cell.X, cell.Y) == TileBrick {
+		if g.Map.GetTile(cell.GridX, cell.GridY) == TileBrick {
 			oldTile := TileBrick
 			var newTile TileType
 
 			// 检查是否是隐藏门
-			if cell.X == g.Map.HiddenDoorPos.X && cell.Y == g.Map.HiddenDoorPos.Y {
+			if cell.GridX == g.Map.HiddenDoorPos.X && cell.GridY == g.Map.HiddenDoorPos.Y {
 				newTile = TileDoor
 			} else {
 				newTile = TileEmpty
@@ -129,14 +119,14 @@ func (g *Game) explodeBomb(bomb *Bomb) {
 
 			// 记录变化（用于客户端同步）
 			explosion.TileChanges = append(explosion.TileChanges, TileChange{
-				X:       cell.X,
-				Y:       cell.Y,
+				GridX:   cell.GridX,
+				GridY:   cell.GridY,
 				OldType: oldTile,
 				NewType: newTile,
 			})
 
 			// 应用变化
-			g.Map.SetTile(cell.X, cell.Y, newTile)
+			g.Map.SetTile(cell.GridX, cell.GridY, newTile)
 		}
 	}
 
@@ -146,7 +136,7 @@ func (g *Game) explodeBomb(bomb *Bomb) {
 			continue
 		}
 		for _, cell := range cells {
-			if otherBomb.X == cell.X && otherBomb.Y == cell.Y {
+			if otherBomb.GridX == cell.GridX && otherBomb.GridY == cell.GridY {
 				g.explodeBomb(otherBomb) // 递归触发
 				break
 			}
@@ -167,7 +157,7 @@ func (g *Game) updateExplosions() {
 
 	newExplosions := make([]*Explosion, 0, len(g.Explosions))
 	for _, exp := range g.Explosions {
-		if !exp.Update() {
+		if !exp.Update(g.CurrentFrame) {
 			newExplosions = append(newExplosions, exp)
 		}
 	}
@@ -184,12 +174,11 @@ func (g *Game) checkDamage(explosion *Explosion) {
 		// 计算玩家中心点所在的格子
 		centerX := player.X + float64(player.Width)/2
 		centerY := player.Y + float64(player.Height)/2
-		pGridX := int(centerX) / TileSize
-		pGridY := int(centerY) / TileSize
+		gridPos := PlayerXYToGrid(int(centerX), int(centerY))
 
 		// 检查是否在爆炸范围内
 		for _, cell := range explosion.Cells {
-			if cell.X == pGridX && cell.Y == pGridY {
+			if cell.GridX == gridPos.GridX && cell.GridY == gridPos.GridY {
 				player.Dead = true
 				break
 			}
@@ -242,8 +231,8 @@ func (g *Game) IsGameOver() bool {
 	// 条件2：幸存者只有1人 (满足PvP胜利前置条件)
 	if aliveCount == 1 {
 		// 检查是否到达门 (满足Stage 1/2 通关条件)
-		pGridX, pGridY := PlayerXYToGrid(int(survivor.X), int(survivor.Y))
-		if g.Map.GetTile(pGridX, pGridY) == TileDoor {
+		gridPos := PlayerXYToGrid(int(survivor.X), int(survivor.Y))
+		if g.Map.GetTile(gridPos.GridX, gridPos.GridY) == TileDoor {
 			return true // 胜利！
 		}
 		// 只有1人幸存，但还没进门 -> 游戏继续

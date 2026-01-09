@@ -2,17 +2,6 @@ package core
 
 import (
 	"math/rand"
-	"time"
-)
-
-// TileType 地图块类型
-type TileType int
-
-const (
-	TileEmpty TileType = iota
-	TileWall           // 不可破坏的墙
-	TileBrick          // 可破坏的砖块
-	TileDoor           // 门 (隐藏在砖块下，炸开后出现)
 )
 
 // GameMap 游戏地图（核心逻辑，不包含渲染）
@@ -23,32 +12,28 @@ type GameMap struct {
 	HiddenDoorPos struct{ X, Y int } // 隐藏门的坐标
 }
 
-// NewGameMap 创建新地图
-func NewGameMap() *GameMap {
-	return NewGameMapWithSeed(time.Now().UnixNano())
+// GridPos 格子坐标（通用类型）
+type GridPos struct {
+	GridX, GridY int
 }
 
 // NewGameMapWithSeed 使用指定种子创建新地图（用于确定性）
-func NewGameMapWithSeed(seed int64) *GameMap {
+func NewGameMap(seed int64) *GameMap {
 	m := &GameMap{
-		Tiles: make([][]TileType, MapHeight),
+		Tiles:  make([][]TileType, MapHeight),
 		Width:  MapWidth,
 		Height: MapHeight,
 	}
 
 	// 使用地图模板（带种子）
-	m.loadMapTemplateWithSeed(seed)
+	m.loadMapTemplateWithSeed(int64(seed))
 
 	return m
 }
 
 // loadMapTemplateWithSeed 加载地图模板（带种子，用于确定性）
 func (m *GameMap) loadMapTemplateWithSeed(seed int64) {
-	rand.Seed(seed)
-
 	// 地图模板：W=墙壁, B=砖块, .=空地
-	// 设计一个更开阔的地图，边缘也可以活动 (20x15)
-	// 每行必须正好20个字符
 	template := []string{
 		"..B.B.W.W.W.W.B.B...",
 		"..W.W.B...B...W.W...",
@@ -82,27 +67,21 @@ func (m *GameMap) loadMapTemplateWithSeed(seed int64) {
 		}
 	}
 
-	// 左上角留出玩家出生安全区域（确保无砖块）
-	m.Tiles[1][1] = TileEmpty
-	m.Tiles[1][2] = TileEmpty
-	m.Tiles[1][3] = TileEmpty
-	m.Tiles[2][1] = TileEmpty
-	m.Tiles[3][1] = TileEmpty
+	// 随机选择一个砖块放置隐藏门
+	brickPositions := []struct{ X, Y int }{}
+	for y := 0; y < MapHeight; y++ {
+		for x := 0; x < MapWidth; x++ {
+			if m.Tiles[y][x] == TileBrick {
+				brickPositions = append(brickPositions, struct{ X, Y int }{X: x, Y: y})
+			}
+		}
+	}
 
-// 随机选择一个砖块放置隐藏门
-brickPositions := []struct{ X, Y int }{}
-for y := 0; y < MapHeight; y++ {
-for x := 0; x < MapWidth; x++ {
-if m.Tiles[y][x] == TileBrick {
-brickPositions = append(brickPositions, struct{ X, Y int }{X: x, Y: y})
-}
-}
-}
-
-if len(brickPositions) > 0 {
-idx := rand.Intn(len(brickPositions))
-m.HiddenDoorPos = brickPositions[idx]
-}
+	r := rand.New(rand.NewSource(seed))
+	if len(brickPositions) > 0 {
+		idx := r.Intn(len(brickPositions))
+		m.HiddenDoorPos = brickPositions[idx]
+	}
 }
 
 // GetTile 获取指定位置的地图块
@@ -121,97 +100,67 @@ func (m *GameMap) SetTile(x, y int, tile TileType) {
 }
 
 // CanMoveTo 检查是否可以移动到指定像素位置
-// bombs: 当前地图上的炸弹列表（使用格子坐标）
-// explosionCells: 当前爆炸影响的格子列表（使用格子坐标）
+// x, y: 目标位置左上角坐标
+// width, height: 目标宽高
+// bombGridPositions: 当前地图上所有炸弹的格子位置
+// explosionCells: 当前地图上所有爆炸影响的格子位置
 func (m *GameMap) CanMoveTo(x, y, width, height int, bombGridPositions []struct{ X, Y int }, explosionCells []GridPos) bool {
-	// 内缩1像素检测，防止边界穿模
-	margin := PlayerMargin
-	x += margin
-	y += margin
-	width -= margin * 2
-	height -= margin * 2
+	// 玩家碰撞盒（Hitbox），稍微内缩以避免边缘穿模
+	hitboxX := x + PlayerMargin
+	hitboxY := y + PlayerMargin
+	hitboxW := PlayerWidth - PlayerMargin*2
+	hitboxHeight := PlayerHeight - PlayerMargin*2
 
-	if width <= 0 || height <= 0 {
+	// 边界检查
+	if hitboxX < 0 || hitboxY < 0 || hitboxX+hitboxW > MapWidth*TileSize || hitboxY+hitboxHeight > MapHeight*TileSize {
 		return false
 	}
 
-	// 像素边界检查，避免负坐标被截断成 0
-	maxX := MapWidth * TileSize
-	maxY := MapHeight * TileSize
-	if x < 0 || y < 0 || x+width >= maxX || y+height >= maxY {
-		return false
-	}
+	// 计算碰撞盒覆盖的格子范围
+	startGridX := hitboxX / TileSize
+	endGridX := (hitboxX + hitboxW - 1) / TileSize
+	startGridY := hitboxY / TileSize
+	endGridY := (hitboxY + hitboxHeight - 1) / TileSize
 
-	// 检查多个点（四角 + 边中点）
-	checkPoints := []struct{ px, py int }{
-		// 四个角
-		{x, y},
-		{x + width, y},
-		{x, y + height},
-		{x + width, y + height},
-		// 上下边的中点
-		{x + width/2, y},
-		{x + width/2, y + height},
-		// 左右边的中点
-		{x, y + height/2},
-		{x + width, y + height/2},
-	}
-
-	for _, point := range checkPoints {
-		gridX := point.px / TileSize
-		gridY := point.py / TileSize
-
-		// 检查地图障碍物
-		tile := m.GetTile(gridX, gridY)
-		if tile == TileWall || tile == TileBrick {
-			return false
-		}
-
-		// 检查炸弹碰撞
-		for _, bombPos := range bombGridPositions {
-			if gridX == bombPos.X && gridY == bombPos.Y {
-				return false
+	for gy := startGridY; gy <= endGridY; gy++ {
+		for gx := startGridX; gx <= endGridX; gx++ {
+			tile := m.GetTile(gx, gy)
+			if tile == TileWall || tile == TileBrick {
+				return false // 碰撞墙或砖块
 			}
-		}
 
-		// 检查爆炸碰撞（不能穿过爆炸区域）
-		for _, expCell := range explosionCells {
-			if gridX == expCell.X && gridY == expCell.Y {
-				return false
+			// 检查炸弹碰撞
+			for _, bPos := range bombGridPositions {
+				if bPos.X == gx && bPos.Y == gy {
+					// 忽略玩家自己放置的炸弹
+					if gx == PlayerXYToGrid(x, y).GridX && gy == PlayerXYToGrid(x, y).GridY {
+						continue
+					}
+					return false // 碰撞炸弹
+				}
+			}
+
+			// 检查爆炸碰撞
+			for _, eCell := range explosionCells {
+				if eCell.GridX == gx && eCell.GridY == gy {
+					return false // 碰撞爆炸区域
+				}
 			}
 		}
 	}
-
 	return true
 }
 
-// CanMoveToWithoutExplosions 不检查爆炸的版本（向后兼容）
-func (m *GameMap) CanMoveToWithoutExplosions(x, y, width, height int, bombGridPositions []struct{ X, Y int }) bool {
-	return m.CanMoveTo(x, y, width, height, bombGridPositions, nil)
-}
-
-// GridToPlayerXY 格子位置转换为玩家所在的位置
+// GridToPlayerXY 格子位置转换为玩家所在的位置，居中放置
 // 地图格子坐标x轴是横向，正方向向右，y轴纵向，正方向向下，0点在左上角
 func GridToPlayerXY(gridX, gridY int) (int, int) {
-	if gridX < 0 {
-		gridX = 0
-	}
-	if gridX >= MapWidth {
-		gridX = MapWidth - 1
-	}
-	if gridY < 0 {
-		gridY = 0
-	}
-	if gridY >= MapHeight {
-		gridY = MapHeight - 1
-	}
-	// 上下左右预留3像素
-	playerSize := TileSize - 6
-	offset := (TileSize - playerSize) / 2
-	return gridX*TileSize + offset, gridY*TileSize + offset
+	return gridX*TileSize + (TileSize-PlayerWidth)/2, gridY*TileSize + (TileSize-PlayerHeight)/2
 }
 
 // PlayerXYToGrid 玩家像素位置转换为格子坐标
-func PlayerXYToGrid(x, y int) (int, int) {
-	return (x + 3) / TileSize, (y + 3) / TileSize
+func PlayerXYToGrid(x, y int) GridPos {
+	return GridPos{
+		GridX: (x + PlayerWidth/2) / TileSize,
+		GridY: (y + PlayerHeight/2) / TileSize,
+	}
 }
