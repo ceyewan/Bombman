@@ -6,6 +6,7 @@ import (
 	"log"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gamev1 "bomberman/api/gen/bomberman/v1"
@@ -18,21 +19,23 @@ const (
 )
 
 type RoomManager struct {
-	ctx       context.Context
-	enableAI  bool
-	rooms     map[string]*Room // 房间 ID -> 房间
-	roomMutex sync.RWMutex     // 保护 rooms map
-	wg        sync.WaitGroup   // 等待组
-	shutdown  chan struct{}    // 关闭信号
+	ctx         context.Context
+	enableAI    bool
+	nextRoomSeq int64
+	rooms       map[string]*Room // 房间 ID -> 房间
+	roomMutex   sync.RWMutex     // 保护 rooms map
+	wg          sync.WaitGroup   // 等待组
+	shutdown    chan struct{}    // 关闭信号
 }
 
 // NewRoomManager 创建新的房间管理器
 func NewRoomManager(ctx context.Context, enableAI bool) *RoomManager {
 	return &RoomManager{
-		ctx:      ctx,
-		enableAI: enableAI,
-		rooms:    make(map[string]*Room),
-		shutdown: make(chan struct{}),
+		ctx:         ctx,
+		enableAI:    enableAI,
+		nextRoomSeq: 0,
+		rooms:       make(map[string]*Room),
+		shutdown:    make(chan struct{}),
 	}
 }
 
@@ -50,7 +53,7 @@ func (m *RoomManager) Run(wg *sync.WaitGroup) {
 func (m *RoomManager) cleanupLoop() {
 	defer m.wg.Done()
 
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -331,9 +334,15 @@ type RoomStats struct {
 
 // CreateRoom 创建新房间（返回房间 ID）
 func (m *RoomManager) CreateRoom() string {
-	roomID := fmt.Sprintf("room_%d", time.Now().UnixNano())
-	m.getOrCreateRoom(roomID)
-	return roomID
+	for {
+		seq := atomic.AddInt64(&m.nextRoomSeq, 1)
+		roomID := fmt.Sprintf("%d", seq)
+		if m.roomExists(roomID) {
+			continue
+		}
+		m.getOrCreateRoom(roomID)
+		return roomID
+	}
 }
 
 // CreateRoomWithID creates a room with a custom ID

@@ -30,6 +30,8 @@ type NetworkGameClient struct {
 	reconnecting         bool
 	reconnectDelay       time.Duration
 	lastReconnectAttempt time.Time
+
+	ignoreBombUntilRelease bool
 }
 
 type inputFrame struct {
@@ -68,6 +70,9 @@ func NewNetworkGameClient(network *NetworkClient, controlScheme ControlScheme) (
 		playerID:       int(network.GetPlayerID()),
 		playersMap:     make(map[int]*Player),
 		reconnectDelay: 2 * time.Second, // 初始重连延迟 2 秒
+	}
+	if controlScheme == ControlArrow && ebiten.IsKeyPressed(ebiten.KeyEnter) {
+		client.ignoreBombUntilRelease = true
 	}
 
 	return client, nil
@@ -306,6 +311,13 @@ func (ngc *NetworkGameClient) handleInput() {
 	}
 
 	up, down, left, right, bomb := getInputState(ngc.game.controlScheme)
+	if ngc.ignoreBombUntilRelease {
+		if bomb {
+			bomb = false
+		} else {
+			ngc.ignoreBombUntilRelease = false
+		}
+	}
 	serverFrame := ngc.network.EstimatedServerFrame()
 	if serverFrame <= 0 {
 		serverFrame = ngc.game.coreGame.CurrentFrame

@@ -35,13 +35,13 @@ var (
 
 // UI Layout Constants
 const (
-	uiPanelMargin     = 12
-	uiPanelPadding    = 16
-	uiTitleMargin     = 20
-	uiRowHeight       = 20
-	uiColumnGap       = 16
-	uiBorderRadius    = 4
-	uiInputBorder     = 2
+	uiPanelMargin  = 12
+	uiPanelPadding = 16
+	uiTitleMargin  = 20
+	uiRowHeight    = 20
+	uiColumnGap    = 16
+	uiBorderRadius = 4
+	uiInputBorder  = 2
 )
 
 type lobbyScreen int
@@ -85,12 +85,12 @@ type LobbyClient struct {
 	joinResultChan chan joinResult
 	input          keyTracker
 	// Room creation input state
-	inputMode       bool
-	inputBuffer     string
+	inputMode        bool
+	inputBuffer      string
 	inputCursorBlink float32
 	// Toast notification
-	toastMessage    string
-	toastTimer      float32
+	toastMessage string
+	toastTimer   float32
 
 	game *NetworkGameClient
 }
@@ -470,8 +470,12 @@ func (lc *LobbyClient) drawLobby(screen *ebiten.Image) {
 			indicatorColor = uiAccent
 		}
 
-		// Room name with number
-		roomName := fmt.Sprintf("%s[%d] %s", indicator, i+1, room.Name)
+		// Room name with ID
+		name := room.Name
+		if name == "" {
+			name = room.Id
+		}
+		roomName := fmt.Sprintf("%s[%d] %s (%s)", indicator, i+1, name, room.Id)
 		drawText(screen, panelX+uiPanelPadding, rowY+5, roomName, indicatorColor)
 
 		// Player count
@@ -642,10 +646,10 @@ func drawPanel(screen *ebiten.Image, x, y, width, height int) {
 	borders := []struct {
 		x1, y1, x2, y2 float32
 	}{
-		{0, 0, float32(width), 0},                                    // Top
-		{0, float32(height), float32(width), float32(height)},        // Bottom
-		{0, 0, 0, float32(height)},                                   // Left
-		{float32(width), 0, float32(width), float32(height)},         // Right
+		{0, 0, float32(width), 0},                             // Top
+		{0, float32(height), float32(width), float32(height)}, // Bottom
+		{0, 0, 0, float32(height)},                            // Left
+		{float32(width), 0, float32(width), float32(height)},  // Right
 	}
 
 	for _, b := range borders {
