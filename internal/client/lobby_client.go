@@ -8,9 +8,11 @@ import (
 	gamev1 "bomberman/api/gen/bomberman/v1"
 
 	"github.com/hajimehoshi/ebiten/v2"
-	"github.com/hajimehoshi/ebiten/v2/text"
+	"github.com/hajimehoshi/ebiten/v2/text/v2"
 	"golang.org/x/image/font/basicfont"
 )
+
+var lobbyFont = text.NewGoXFace(basicfont.Face7x13)
 
 type lobbyScreen int
 
@@ -351,7 +353,10 @@ func (lc *LobbyClient) drawRoom(screen *ebiten.Image) {
 }
 
 func drawText(screen *ebiten.Image, x, y int, msg string, clr color.Color) {
-	text.Draw(screen, msg, basicfont.Face7x13, x, y, clr)
+	options := &text.DrawOptions{}
+	options.GeoM.Translate(float64(x), float64(y))
+	options.ColorScale.ScaleWithColor(clr)
+	text.Draw(screen, msg, lobbyFont, options)
 }
 
 func roomStatusLabel(status gamev1.RoomStatus) string {
