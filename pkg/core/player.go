@@ -43,9 +43,25 @@ func NewPlayer(id int, x, y int, charType CharacterType) *Player {
 		BombIgnoreGridX:    0,
 		BombIgnoreGridY:    0,
 		BombIgnoreActive:   false,
-		MaxBombs:           1,
-		BombRange:          3,
+		MaxBombs:           BombMaxCountDefault,
+		BombRange:          BombExplosionRange,
 	}
+}
+
+// SetMaxBombs 设置最大同时炸弹数（最小为 1）
+func (p *Player) SetMaxBombs(max int) {
+	if max < 1 {
+		max = 1
+	}
+	p.MaxBombs = max
+}
+
+// SetBombRange 设置炸弹范围（最小为 1）
+func (p *Player) SetBombRange(rangeCells int) {
+	if rangeCells < 1 {
+		rangeCells = 1
+	}
+	p.BombRange = rangeCells
 }
 
 // Update 每帧更新玩家状态

@@ -46,6 +46,7 @@ const (
 	BombExplosionFrames      = 30  // 爆炸持续时间：0.5秒 × 60 = 30帧
 	BombPlacementDelayFrames = 12  // 炸弹放置防抖：0.2秒 × 60 = 12帧
 	BombExplosionRange       = 2   // 默认爆炸范围：2格
+	BombMaxCountDefault      = 2   // 默认可同时放置炸弹数
 
 	// 玩家相关
 	PlayerSpeedPerFrame = 2.0 // 像素/帧 = 120像素/秒 ÷ 60
