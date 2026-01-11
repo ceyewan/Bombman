@@ -157,6 +157,8 @@ func (g *Game) updateExplosions() {
 
 	newExplosions := make([]*Explosion, 0, len(g.Explosions))
 	for _, exp := range g.Explosions {
+		// 爆炸存活期间持续判定伤害
+		g.checkDamage(exp)
 		if !exp.Update(g.CurrentFrame) {
 			newExplosions = append(newExplosions, exp)
 		}
@@ -171,14 +173,14 @@ func (g *Game) checkDamage(explosion *Explosion) {
 			continue
 		}
 
-		// 计算玩家中心点所在的格子
+		// 使用玩家中心点所在格子判定伤害
 		centerX := player.X + float64(player.Width)/2
 		centerY := player.Y + float64(player.Height)/2
-		gridPos := PlayerXYToGrid(int(centerX), int(centerY))
+		gridX := int(centerX) / TileSize
+		gridY := int(centerY) / TileSize
 
-		// 检查是否在爆炸范围内
 		for _, cell := range explosion.Cells {
-			if cell.GridX == gridPos.GridX && cell.GridY == gridPos.GridY {
+			if cell.GridX == gridX && cell.GridY == gridY {
 				player.Dead = true
 				break
 			}
