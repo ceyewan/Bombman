@@ -20,14 +20,34 @@ func actFindTarget(bb bt.Blackboard) bt.Status {
 	board := bb.(*Blackboard)
 	start := getPlayerGrid(board.Player)
 
-	if target := findEnemyTarget(board.Game, board.Player, start); target != nil {
-		board.Target = target
-		return bt.StatusSuccess
+	// 根据配置决定优先级
+	preferBricks := true
+	if board.Config != nil {
+		preferBricks = board.Config.PreferBricks
 	}
 
-	if target := findBrickTarget(board.Game, start); target != nil {
-		board.Target = target
-		return bt.StatusSuccess
+	if preferBricks {
+		// 优先炸砖块开路
+		if target := findBrickTarget(board.Game, start); target != nil {
+			board.Target = target
+			return bt.StatusSuccess
+		}
+		// 其次追击敌人
+		if target := findEnemyTarget(board.Game, board.Player, start); target != nil {
+			board.Target = target
+			return bt.StatusSuccess
+		}
+	} else {
+		// 敌人优先
+		if target := findEnemyTarget(board.Game, board.Player, start); target != nil {
+			board.Target = target
+			return bt.StatusSuccess
+		}
+		// 其次炸砖块
+		if target := findBrickTarget(board.Game, start); target != nil {
+			board.Target = target
+			return bt.StatusSuccess
+		}
 	}
 
 	return bt.StatusFailure
@@ -60,25 +80,19 @@ func actPreCheckEscape(bb bt.Blackboard) bt.Status {
 			temp.Earliest[cell.GridY][cell.GridX] = bomb.ExplodeAtFrame
 		}
 	}
-	// Chain: if the new bomb triggers existing bombs earlier, apply their cells too.
-	for _, other := range board.Game.Bombs {
-		if other.Exploded {
-			continue
-		}
-		for _, cell := range cells {
-			if other.GridX == cell.GridX && other.GridY == cell.GridY {
-				otherCells := other.GetExplosionCells(board.Game.Map)
-				for _, oc := range otherCells {
-					if oc.GridX < 0 || oc.GridX >= core.MapWidth || oc.GridY < 0 || oc.GridY >= core.MapHeight {
-						continue
-					}
-					if bomb.ExplodeAtFrame < temp.Earliest[oc.GridY][oc.GridX] {
-						temp.Earliest[oc.GridY][oc.GridX] = bomb.ExplodeAtFrame
-					}
-				}
-				break
-			}
-		}
+
+	// 根据配置决定是否完整计算连锁爆炸
+	fullChain := false
+	if board.Config != nil {
+		fullChain = board.Config.FullChainRecursion
+	}
+
+	if fullChain {
+		// 完整连锁爆炸计算
+		applyFullChainExplosion(board.Game, &temp, bomb)
+	} else {
+		// 简化计算：只处理一层连锁
+		applySimpleChainExplosion(board.Game, &temp, bomb, cells)
 	}
 
 	if !canEscapeAfterPlacement(board.Game, &temp, pos, board.Frame) {
@@ -86,6 +100,84 @@ func actPreCheckEscape(bb bt.Blackboard) bt.Status {
 	}
 
 	return bt.StatusSuccess
+}
+
+// applySimpleChainExplosion 简化连锁爆炸：只处理一层
+func applySimpleChainExplosion(game *core.Game, temp *DangerField, newBomb *core.Bomb, cells []core.GridPos) {
+	for _, other := range game.Bombs {
+		if other.Exploded {
+			continue
+		}
+		for _, cell := range cells {
+			if other.GridX == cell.GridX && other.GridY == cell.GridY {
+				otherCells := other.GetExplosionCells(game.Map)
+				for _, oc := range otherCells {
+					if oc.GridX < 0 || oc.GridX >= core.MapWidth || oc.GridY < 0 || oc.GridY >= core.MapHeight {
+						continue
+					}
+					if newBomb.ExplodeAtFrame < temp.Earliest[oc.GridY][oc.GridX] {
+						temp.Earliest[oc.GridY][oc.GridX] = newBomb.ExplodeAtFrame
+					}
+				}
+				break
+			}
+		}
+	}
+}
+
+// applyFullChainExplosion 完整连锁爆炸计算
+func applyFullChainExplosion(game *core.Game, temp *DangerField, newBomb *core.Bomb) {
+	// 收集所有炸弹（包括新炸弹）
+	allBombs := make([]*core.Bomb, 0, len(game.Bombs)+1)
+	allBombs = append(allBombs, newBomb)
+	for _, b := range game.Bombs {
+		if !b.Exploded {
+			allBombs = append(allBombs, b)
+		}
+	}
+
+	// 计算实际爆炸时间
+	actual := make(map[*core.Bomb]int32, len(allBombs))
+	for _, b := range allBombs {
+		actual[b] = b.ExplodeAtFrame
+	}
+
+	// 迭代传播连锁爆炸直到稳定
+	changed := true
+	for changed {
+		changed = false
+		for _, b := range allBombs {
+			bFrame := actual[b]
+			cells := b.GetExplosionCells(game.Map)
+			for _, cell := range cells {
+				for _, other := range allBombs {
+					if other == b {
+						continue
+					}
+					if other.GridX == cell.GridX && other.GridY == cell.GridY {
+						if actual[other] > bFrame {
+							actual[other] = bFrame
+							changed = true
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 应用最终的爆炸时间到临时危险场
+	for _, b := range allBombs {
+		cells := b.GetExplosionCells(game.Map)
+		when := actual[b]
+		for _, cell := range cells {
+			if cell.GridX < 0 || cell.GridX >= core.MapWidth || cell.GridY < 0 || cell.GridY >= core.MapHeight {
+				continue
+			}
+			if when < temp.Earliest[cell.GridY][cell.GridX] {
+				temp.Earliest[cell.GridY][cell.GridX] = when
+			}
+		}
+	}
 }
 
 func actMoveToTarget(bb bt.Blackboard) bt.Status {

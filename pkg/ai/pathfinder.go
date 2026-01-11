@@ -6,6 +6,11 @@ import (
 	"bomberman/pkg/core"
 )
 
+// framesPerTile 是移动一格所需的帧数
+// TileSize = 32 像素, PlayerSpeedPerFrame = 2.0 像素/帧
+// 32 / 2 = 16 帧
+const framesPerTile = int32(core.TileSize / core.PlayerSpeedPerFrame)
+
 type stepNode struct {
 	Pos   core.GridPos
 	Prev  *stepNode
@@ -100,7 +105,7 @@ func canEscapeAfterPlacement(game *core.Game, danger *DangerField, start core.Gr
 		for _, d := range directions {
 			nx := n.Pos.GridX + d.GridX
 			ny := n.Pos.GridY + d.GridY
-			nextFrame := n.Frame + 1
+			nextFrame := n.Frame + framesPerTile // 移动一格需要 16 帧
 			if nextFrame-currentFrame > int32(core.BombFuseFrames) {
 				continue
 			}

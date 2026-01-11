@@ -11,6 +11,7 @@ import (
 type AIController struct {
 	PlayerID int
 	rnd      *rand.Rand
+	config   *AIConfig
 
 	thinkIntervalFrames int
 	thinkCounter        int
@@ -21,17 +22,30 @@ type AIController struct {
 	danger     DangerField
 }
 
+// NewAIController 创建 AI 控制器，使用默认配置（普通难度）
 func NewAIController(playerID int) *AIController {
+	return NewAIControllerWithConfig(playerID, &AIConfigNormal)
+}
+
+// NewAIControllerWithConfig 创建 AI 控制器，使用指定配置
+func NewAIControllerWithConfig(playerID int, config *AIConfig) *AIController {
 	rnd := rand.New(rand.NewSource(time.Now().UnixNano() + int64(playerID)))
+
+	if config == nil {
+		config = &AIConfigNormal
+	}
+
 	controller := &AIController{
 		PlayerID:            playerID,
 		rnd:                 rnd,
-		thinkIntervalFrames: core.AIThinkIntervalFrames,
+		config:              config,
+		thinkIntervalFrames: config.ThinkIntervalFrames,
 	}
 
 	controller.blackboard = Blackboard{
 		RNG:    rnd,
 		Danger: &controller.danger,
+		Config: config,
 	}
 
 	controller.tree = &bt.Selector{Children: []bt.Node{
@@ -83,14 +97,58 @@ func (c *AIController) Decide(game *core.Game) core.Input {
 		return c.cachedInput
 	}
 
+	// 更新危险场
 	c.danger.Update(game)
+
+	// 如果刚放了炸弹，立即清空逃生目标，强制重新计算
+	if c.cachedInput.Bomb {
+		c.blackboard.EscapeTo = nil
+	}
+
 	c.blackboard.ForceThink = force
 	c.thinkCounter = 0
 	c.blackboard.NextInput = core.Input{}
 
 	_ = c.tree.Tick(c.blackboard.AsBT())
+
+	// 应用随机失误
+	if c.config.MistakeRate > 0 && c.rnd.Float64() < c.config.MistakeRate {
+		// 失误：随机改变输入或什么都不做
+		switch c.rnd.Intn(3) {
+		case 0:
+			// 什么都不做
+			c.blackboard.NextInput = core.Input{}
+		case 1:
+			// 随机方向
+			dirs := []core.Input{
+				{Up: true},
+				{Down: true},
+				{Left: true},
+				{Right: true},
+			}
+			c.blackboard.NextInput = dirs[c.rnd.Intn(4)]
+		case 2:
+			// 保持原输入（不失误）
+		}
+	}
+
 	c.cachedInput = c.blackboard.NextInput
 	return c.cachedInput
+}
+
+// GetConfig 获取当前配置
+func (c *AIController) GetConfig() *AIConfig {
+	return c.config
+}
+
+// SetConfig 设置新配置
+func (c *AIController) SetConfig(config *AIConfig) {
+	if config == nil {
+		return
+	}
+	c.config = config
+	c.blackboard.Config = config
+	c.thinkIntervalFrames = config.ThinkIntervalFrames
 }
 
 func getPlayerByID(game *core.Game, playerID int) *core.Player {
