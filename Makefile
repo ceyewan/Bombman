@@ -2,8 +2,11 @@
 
 .PHONY: gen clean lint format help install-tools build local server client clients
 
+# 默认配置
 PROTO ?= tcp
 ADDR ?= localhost:8080
+CHARACTER ?= 0
+CONTROL ?= wasd
 
 # 默认目标
 help:
@@ -14,17 +17,20 @@ help:
 	@echo "常用命令:"
 	@echo "  make build       - 编译服务器和客户端可执行文件"
 	@echo "  make local       - 启动单机版游戏"
-	@echo "  make server      - 启动联机服务器"
-	@echo "  make client      - 启动联机客户端"
+	@echo "  make server      - 启动联机服务器 (TCP + AI)"
+	@echo "  make client      - 启动联机客户端（带大厅）"
 	@echo "  make clients     - 启动两个联机客户端（测试用）"
 	@echo ""
 	@echo "参数配置:"
-	@echo "  PROTO            网络协议 (tcp/kcp)，默认: kcp"
-	@echo "  ADDR             服务器监听地址，默认: :8080"
+	@echo "  PROTO            网络协议 (tcp/kcp)，默认: tcp"
+	@echo "  ADDR             服务器地址，默认: localhost:8080"
+	@echo "  CHARACTER        角色类型 (0-3)，默认: 0"
+	@echo "  CONTROL          控制方案 (wasd/arrow)，默认: wasd"
 	@echo ""
 	@echo "示例:"
-	@echo "  make server ADDR=:9000 PROTO=tcp     - 启动 TCP 服务器，监听 9000 端口"
-	@echo "  make client ADDR=localhost:9000      - 连接到 localhost:9000"
+	@echo "  make server PROTO=kcp                - 启动 KCP 服务器"
+	@echo "  make client ADDR=localhost:9000      - 连接到指定服务器"
+	@echo "  make client CHARACTER=1 CONTROL=arrow - 使用黑色角色+方向键"
 	@echo ""
 	@echo "开发工具:"
 	@echo "  make gen         - 生成 Protobuf 代码"
@@ -62,25 +68,28 @@ local:
 	@echo "启动单机版游戏..."
 	go run cmd/client/main.go
 
-# 启动联机服务器
+# 启动联机服务器（默认 TCP + AI）
 server:
 	@echo "启动联机服务器..."
 	@echo "  协议: $(PROTO)"
 	@echo "  地址: $(ADDR)"
-	go run cmd/server/main.go -addr=$(ADDR) -proto=$(PROTO)
+	@echo "  AI: 已启用"
+	go run cmd/server/main.go -addr=$(ADDR) -proto=$(PROTO) -enable-ai
 
-# 启动联机客户端
+# 启动联机客户端（默认大厅模式）
 client:
-	@echo "启动联机客户端..."
-	@echo "  协议: $(PROTO)"
+	@echo "启动联机客户端（大厅模式）..."
 	@echo "  服务器: $(ADDR)"
-	go run cmd/client/main.go -server=$(ADDR) -proto=$(PROTO)
+	@echo "  协议: $(PROTO)"
+	@echo "  角色: $(CHARACTER)"
+	@echo "  控制: $(CONTROL)"
+	go run cmd/client/main.go -server=$(ADDR) -proto=$(PROTO) -character=$(CHARACTER) -control=$(CONTROL)
 
-# 启动两个联机客户端
+# 启动两个联机客户端（测试用）
 clients:
 	@echo "启动两个联机客户端..."
-	@echo "  协议: $(PROTO)"
 	@echo "  服务器: $(ADDR)"
+	@echo "  协议: $(PROTO)"
 	@go run cmd/client/main.go -server=$(ADDR) -proto=$(PROTO) -character=0 -control=wasd & \
 	go run cmd/client/main.go -server=$(ADDR) -proto=$(PROTO) -character=1 -control=arrow & \
 	wait
@@ -142,24 +151,22 @@ help-dev:
 	@echo "  make check       - 检查破坏性变更"
 	@echo "  make install-tools - 安装 Buf CLI"
 	@echo ""
-	@echo "游戏运行（命令行直接运行）:"
-	@echo "  单机版：go run cmd/client/main.go -character=1 -control=arrow"
-	@echo "  联机服务器：go run cmd/server/main.go -addr=:9000 -proto=tcp"
-	@echo "  联机客户端：go run cmd/client/main.go -server=localhost:9000 -proto=tcp"
+	@echo "游戏运行（直接使用 go run）:"
+	@echo "  单机版：go run cmd/client/main.go"
+	@echo "  服务器：go run cmd/server/main.go -addr=:8080 -proto=tcp -enable-ai"
+	@echo "  客户端：go run cmd/client/main.go -server=localhost:8080"
 	@echo ""
-	@echo "角色类型（-character 参数）:"
-	@echo "  0 - 白色炸弹人（经典）"
-	@echo "  1 - 黑色炸弹人（暗夜）"
-	@echo "  2 - 红色炸弹人（烈焰）"
-	@echo "  3 - 蓝色炸弹人（冰霜）"
+	@echo "服务器参数:"
+	@echo "  -addr          监听地址，默认 :8080"
+	@echo "  -proto         协议类型 (tcp/kcp)，默认 tcp"
+	@echo "  -enable-ai     是否启用 AI 填充空位，默认 false"
 	@echo ""
-	@echo "控制方案（-control 参数）:"
-	@echo "  wasd   - WASD 移动 + 空格键放炸弹"
-	@echo "  arrow  - 方向键移动 + 回车键放炸弹"
-	@echo ""
-	@echo "网络协议（-proto 参数）:"
-	@echo "  tcp    - TCP 协议（可靠，但延迟较高）"
-	@echo "  kcp    - KCP 协议（低延迟，推荐）"
+	@echo "客户端参数:"
+	@echo "  -server        服务器地址（留空=单机模式）"
+	@echo "  -proto         协议类型 (tcp/kcp)，默认 tcp"
+	@echo "  -character     角色类型 (0=白, 1=黑, 2=红, 3=蓝)，默认 0"
+	@echo "  -control       控制方案 (wasd/arrow)，默认 wasd"
+	@echo "  -quick         跳过大厅直接加入默认房间，默认 false"
 	@echo ""
 	@echo "测试:"
 	@echo "  go test ./pkg/core/..."
