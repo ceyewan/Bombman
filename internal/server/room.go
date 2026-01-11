@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"time"
 
@@ -18,6 +19,9 @@ type Room struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	id     string // 房间 ID
+	seed   int64
+
+	legacyMode bool
 
 	game    *core.Game
 	frameID int32
@@ -39,9 +43,17 @@ type Room struct {
 	// 记录上一帧玩家死亡状态，用于检测变化
 	lastPlayerDeadState map[int32]bool
 
-	joinCh  chan joinRequest
-	inputCh chan inputEvent
-	leaveCh chan int32
+	// 房间大厅状态
+	hostID           int32
+	readyStatus      map[int32]bool
+	playerNames      map[int32]string
+	playerCharacters map[int32]core.CharacterType
+	roomName         string
+
+	joinCh   chan joinRequest
+	inputCh  chan inputEvent
+	leaveCh  chan int32
+	actionCh chan roomActionRequest
 }
 
 type joinRequest struct {
@@ -55,14 +67,22 @@ type inputEvent struct {
 	input    InputEvent
 }
 
-func NewRoom(parent context.Context, enableAI bool) *Room {
+type roomActionRequest struct {
+	playerID int32
+	action   *gamev1.RoomAction
+	respCh   chan error
+}
+
+func NewRoom(parent context.Context, roomID string, seed int64, enableAI bool, legacyMode bool) *Room {
 	ctx, cancel := context.WithCancel(parent)
 
 	return &Room{
 		ctx:                   ctx,
 		cancel:                cancel,
-		id:                    "default", // 默认房间 ID
-		game:                  core.NewGame(0),
+		id:                    roomID,
+		seed:                  seed,
+		legacyMode:            legacyMode,
+		game:                  core.NewGame(seed),
 		frameID:               0,
 		state:                 StateWaiting,
 		enableAI:              enableAI,
@@ -74,9 +94,13 @@ func NewRoom(parent context.Context, enableAI bool) *Room {
 		lastInput:             make(map[int32]InputData),
 		lastProcessedInputSeq: make(map[int32]int32),
 		lastPlayerDeadState:   make(map[int32]bool),
+		readyStatus:           make(map[int32]bool),
+		playerNames:           make(map[int32]string),
+		playerCharacters:      make(map[int32]core.CharacterType),
 		joinCh:                make(chan joinRequest),
 		inputCh:               make(chan inputEvent, 256),
 		leaveCh:               make(chan int32, 256),
+		actionCh:              make(chan roomActionRequest, 64),
 	}
 }
 
@@ -103,6 +127,9 @@ func (r *Room) Run(wg *sync.WaitGroup) {
 
 		case playerID := <-r.leaveCh:
 			r.handleLeave(playerID)
+
+		case req := <-r.actionCh:
+			r.handleRoomAction(req)
 
 		case <-ticker.C:
 			r.tick()
@@ -148,6 +175,30 @@ func (r *Room) Leave(playerID int32) {
 	case <-r.ctx.Done():
 		return
 	case r.leaveCh <- playerID:
+	}
+}
+
+func (r *Room) HandleRoomAction(playerID int32, action *gamev1.RoomAction) error {
+	if action == nil {
+		return fmt.Errorf("房间操作为空")
+	}
+
+	respCh := make(chan error, 1)
+	select {
+	case <-r.ctx.Done():
+		return fmt.Errorf("房间已关闭")
+	case r.actionCh <- roomActionRequest{
+		playerID: playerID,
+		action:   action,
+		respCh:   respCh,
+	}:
+	}
+
+	select {
+	case <-r.ctx.Done():
+		return fmt.Errorf("房间已关闭")
+	case err := <-respCh:
+		return err
 	}
 }
 
@@ -273,18 +324,18 @@ func (r *Room) handleJoin(req joinRequest) {
 		return
 	}
 
-	if len(r.connections) >= MaxPlayers {
-		req.respCh <- fmt.Errorf("服务器已满 (%d/%d)", len(r.connections), MaxPlayers)
+	if len(r.connections)+len(r.aiControllers) >= MaxPlayers {
+		req.respCh <- fmt.Errorf("服务器已满 (%d/%d)", len(r.connections)+len(r.aiControllers), MaxPlayers)
+		return
+	}
+
+	if !r.legacyMode && r.state != StateWaiting {
+		req.respCh <- fmt.Errorf("房间游戏中，暂时无法加入")
 		return
 	}
 
 	// 转换角色类型
-	// 注意：新 Proto 使用 character_id (int32) 而不是 character_type (枚举)
-	// ID 到 CharacterType 的映射：0=White, 1=Black, 2=Red, 3=Blue
-	characterType := core.CharacterType(req.req.CharacterID - 1)
-	if req.req.CharacterID <= 0 {
-		characterType = core.CharacterWhite // 默认白色
-	}
+	characterType := protocol.ProtoCharacterTypeToCore(req.req.Character)
 
 	// 分配玩家 ID
 	playerID := r.nextPlayerID
@@ -301,7 +352,22 @@ func (r *Room) handleJoin(req joinRequest) {
 
 	// 保存连接
 	req.conn.SetPlayerID(playerID)
+	req.conn.SetRoomID(r.id)
 	r.connections[playerID] = req.conn
+	r.playerNames[playerID] = req.req.PlayerName
+	r.playerCharacters[playerID] = characterType
+	r.readyStatus[playerID] = false
+
+	if r.hostID == 0 {
+		r.hostID = playerID
+		if r.roomName == "" {
+			name := req.req.PlayerName
+			if name == "" {
+				name = fmt.Sprintf("Player%d", playerID)
+			}
+			r.roomName = fmt.Sprintf("%s's room", name)
+		}
+	}
 
 	// 生成会话 Token（用于重连）
 	sessionToken, err := GenerateSessionToken(playerID, r.id)
@@ -311,6 +377,7 @@ func (r *Room) handleJoin(req joinRequest) {
 	}
 
 	// 发送 JoinResponse（包含玩家ID和游戏配置）
+	roomState := r.buildRoomState()
 	packet, err := protocol.NewJoinResponsePacket(
 		true,
 		playerID,
@@ -318,6 +385,8 @@ func (r *Room) handleJoin(req joinRequest) {
 		r.game.Seed,
 		int32(core.TPS),
 		sessionToken,
+		r.id,
+		roomState,
 	)
 	if err != nil {
 		req.respCh <- fmt.Errorf("构造加入响应失败: %w", err)
@@ -335,20 +404,25 @@ func (r *Room) handleJoin(req joinRequest) {
 		r.removePlayerByID(playerID)
 		delete(r.connections, playerID)
 		req.conn.SetPlayerID(-1)
+		req.conn.SetRoomID("")
 		req.respCh <- fmt.Errorf("发送游戏开始消息失败: %w", err)
 		return
 	}
 
 	log.Printf("玩家 %d 加入，角色: %s, 出生点: (%d, %d)", playerID, characterType, x, y)
-	log.Printf("玩家 %d 游戏开始消息已发送", playerID)
+	log.Printf("玩家 %d 加入响应已发送", playerID)
 
-	if r.state != StateRunning {
-		r.state = StateRunning
-	}
-
-	// 尝试添加 AI 玩家
-	if r.enableAI {
-		r.tryFillWithAI()
+	if r.legacyMode {
+		if r.state != StateRunning {
+			r.state = StateRunning
+			r.broadcastRoomState()
+			r.broadcastGameStart(0)
+		}
+		if r.enableAI {
+			r.tryFillWithAI()
+		}
+	} else {
+		r.broadcastRoomState()
 	}
 
 	req.respCh <- nil
@@ -386,38 +460,334 @@ func (r *Room) handleInput(ev inputEvent) {
 }
 
 func (r *Room) handleLeave(playerID int32) {
-	if _, exists := r.connections[playerID]; !exists {
+	conn, isHuman := r.connections[playerID]
+	_, isAI := r.aiControllers[playerID]
+	if !isHuman && !isAI {
 		return
 	}
 
-	delete(r.connections, playerID)
-	delete(r.inputQueue, playerID)
-	delete(r.sendQueueFullAt, playerID)
-	delete(r.lastProcessedInputSeq, playerID)
-	delete(r.lastInput, playerID)
+	if isHuman {
+		delete(r.connections, playerID)
+		delete(r.inputQueue, playerID)
+		delete(r.sendQueueFullAt, playerID)
+		delete(r.lastProcessedInputSeq, playerID)
+		delete(r.lastInput, playerID)
+		conn.SetPlayerID(-1)
+		conn.SetRoomID("")
+	}
+
+	if isAI {
+		delete(r.aiControllers, playerID)
+	}
+
+	delete(r.readyStatus, playerID)
+	delete(r.playerNames, playerID)
+	delete(r.playerCharacters, playerID)
 
 	r.removePlayerByID(playerID)
 
 	log.Printf("玩家 %d 离开，当前玩家数: %d", playerID, len(r.connections))
 
-	// 广播玩家离开事件
-	event := &gamev1.GameEvent{
-		Event: &gamev1.GameEvent_PlayerLeft{
-			PlayerLeft: &gamev1.PlayerLeftEvent{
-				PlayerId: playerID,
+	if isHuman {
+		// 广播玩家离开事件
+		event := &gamev1.GameEvent{
+			Event: &gamev1.GameEvent_PlayerLeft{
+				PlayerLeft: &gamev1.PlayerLeftEvent{
+					PlayerId: playerID,
+				},
 			},
-		},
-	}
-	packet, err := protocol.NewGameEventPacket(r.frameID, event)
-	if err == nil {
-		data, _ := protocol.MarshalPacket(packet)
-		for _, c := range r.connections {
-			c.Send(data)
 		}
+		packet, err := protocol.NewGameEventPacket(r.frameID, event)
+		if err == nil {
+			data, _ := protocol.MarshalPacket(packet)
+			for _, c := range r.connections {
+				c.Send(data)
+			}
+		}
+	}
+
+	if playerID == r.hostID {
+		r.transferHost()
+	}
+
+	if !r.legacyMode {
+		r.broadcastRoomState()
 	}
 
 	if len(r.game.Players) == 0 && r.state == StateRunning {
 		r.handleGameOver(-1)
+	}
+}
+
+func (r *Room) handleRoomAction(req roomActionRequest) {
+	if req.action == nil {
+		req.respCh <- errors.New("房间操作为空")
+		return
+	}
+
+	if r.legacyMode && req.action.Type != gamev1.RoomActionType_ROOM_ACTION_LEAVE {
+		req.respCh <- errors.New("兼容房间不支持该操作")
+		return
+	}
+
+	switch req.action.Type {
+	case gamev1.RoomActionType_ROOM_ACTION_READY:
+		if r.state != StateWaiting {
+			req.respCh <- errors.New("游戏中无法准备")
+			return
+		}
+		if _, ok := r.connections[req.playerID]; !ok {
+			req.respCh <- errors.New("玩家不在房间中")
+			return
+		}
+		r.readyStatus[req.playerID] = req.action.Ready
+		r.broadcastRoomState()
+
+	case gamev1.RoomActionType_ROOM_ACTION_START:
+		if ok, msg := r.CanStart(req.playerID); !ok {
+			req.respCh <- errors.New(msg)
+			return
+		}
+		r.startGame()
+
+	case gamev1.RoomActionType_ROOM_ACTION_ADD_AI:
+		if req.playerID != r.hostID {
+			req.respCh <- errors.New("只有房主可以添加 AI")
+			return
+		}
+		if r.state != StateWaiting {
+			req.respCh <- errors.New("游戏中无法添加 AI")
+			return
+		}
+		if !r.enableAI {
+			req.respCh <- errors.New("服务器未启用 AI")
+			return
+		}
+		if err := r.addAI(int(req.action.AiCount)); err != nil {
+			req.respCh <- err
+			return
+		}
+		r.broadcastRoomState()
+
+	case gamev1.RoomActionType_ROOM_ACTION_LEAVE:
+		if _, ok := r.connections[req.playerID]; !ok {
+			req.respCh <- errors.New("玩家不在房间中")
+			return
+		}
+		r.handleLeave(req.playerID)
+
+	case gamev1.RoomActionType_ROOM_ACTION_KICK:
+		if req.playerID != r.hostID {
+			req.respCh <- errors.New("只有房主可以踢人")
+			return
+		}
+		if err := r.kickPlayer(req.action.TargetPlayer); err != nil {
+			req.respCh <- err
+			return
+		}
+
+	default:
+		req.respCh <- errors.New("未知房间操作")
+		return
+	}
+
+	req.respCh <- nil
+}
+
+// CanStart 检查是否可以开始游戏
+func (r *Room) CanStart(requestorID int32) (bool, string) {
+	if r.state != StateWaiting {
+		return false, "游戏已开始"
+	}
+	if requestorID != r.hostID {
+		return false, "只有房主可以开始游戏"
+	}
+
+	totalPlayers := len(r.connections) + len(r.aiControllers)
+	if totalPlayers < 2 {
+		return false, "至少需要 2 名玩家"
+	}
+
+	for playerID := range r.connections {
+		if playerID == r.hostID {
+			continue
+		}
+		if !r.readyStatus[playerID] {
+			return false, "有玩家未准备"
+		}
+	}
+
+	return true, ""
+}
+
+func (r *Room) startGame() {
+	if r.state == StateRunning {
+		return
+	}
+	r.state = StateRunning
+	r.inputQueue = make(map[int32]map[int32]InputData)
+	r.lastInput = make(map[int32]InputData)
+	r.lastProcessedInputSeq = make(map[int32]int32)
+	r.lastPlayerDeadState = make(map[int32]bool)
+
+	r.broadcastRoomState()
+	r.broadcastGameStart(0)
+}
+
+func (r *Room) transferHost() {
+	r.hostID = 0
+	for playerID := range r.connections {
+		r.hostID = playerID
+		break
+	}
+}
+
+func (r *Room) addAI(count int) error {
+	if count <= 0 {
+		return nil
+	}
+	availableChars := []core.CharacterType{
+		core.CharacterWhite,
+		core.CharacterBlack,
+		core.CharacterBlue,
+		core.CharacterRed,
+	}
+
+	for count > 0 && len(r.game.Players) < MaxPlayers {
+		playerID := r.nextPlayerID
+		r.nextPlayerID++
+
+		x, y := getSpawnPosition(int(playerID))
+		charType := availableChars[(playerID-1)%int32(len(availableChars))]
+
+		player := core.NewPlayer(int(playerID), x, y, charType)
+		r.game.AddPlayer(player)
+
+		r.aiControllers[playerID] = ai.NewAIController(int(playerID))
+		r.playerNames[playerID] = fmt.Sprintf("AI-%d", playerID)
+		r.playerCharacters[playerID] = charType
+		r.readyStatus[playerID] = true
+
+		count--
+	}
+
+	if count > 0 {
+		return errors.New("房间已满，无法继续添加 AI")
+	}
+	return nil
+}
+
+func (r *Room) kickPlayer(targetID int32) error {
+	conn, ok := r.connections[targetID]
+	if !ok {
+		return errors.New("目标玩家不在房间中")
+	}
+
+	sessionToken, err := GenerateSessionToken(0, "")
+	if err == nil {
+		packet, err := protocol.NewRoomActionResponsePacket(false, "你已被踢出房间", sessionToken, "")
+		if err == nil {
+			if data, err := protocol.MarshalPacket(packet); err == nil {
+				_ = conn.Send(data)
+			}
+		}
+	}
+
+	r.handleLeave(targetID)
+	return nil
+}
+
+func (r *Room) buildRoomState() *gamev1.RoomStateUpdate {
+	status := gamev1.RoomStatus_ROOM_STATUS_WAITING
+	if r.state == StateRunning || r.state == StateEnding {
+		status = gamev1.RoomStatus_ROOM_STATUS_PLAYING
+	}
+
+	playerIDs := make([]int, 0, len(r.connections)+len(r.aiControllers))
+	for playerID := range r.connections {
+		playerIDs = append(playerIDs, int(playerID))
+	}
+	for playerID := range r.aiControllers {
+		playerIDs = append(playerIDs, int(playerID))
+	}
+	sort.Ints(playerIDs)
+
+	players := make([]*gamev1.RoomPlayer, 0, len(playerIDs))
+	for _, id := range playerIDs {
+		playerID := int32(id)
+		_, isAI := r.aiControllers[playerID]
+		name := r.playerNames[playerID]
+		if name == "" {
+			if isAI {
+				name = fmt.Sprintf("AI-%d", playerID)
+			} else {
+				name = fmt.Sprintf("Player%d", playerID)
+			}
+		}
+		ready := r.readyStatus[playerID]
+		if isAI {
+			ready = true
+		}
+		charType := protocol.CoreCharacterTypeToProto(r.playerCharacters[playerID])
+		players = append(players, &gamev1.RoomPlayer{
+			Id:        playerID,
+			Name:      name,
+			Character: charType,
+			IsReady:   ready,
+			IsHost:    playerID == r.hostID,
+			IsAi:      isAI,
+		})
+	}
+
+	return &gamev1.RoomStateUpdate{
+		RoomId:  r.id,
+		Status:  status,
+		Players: players,
+		HostId:  r.hostID,
+	}
+}
+
+func (r *Room) broadcastRoomState() {
+	update := r.buildRoomState()
+	packet, err := protocol.NewRoomStateUpdatePacket(update)
+	if err != nil {
+		log.Printf("构造房间状态失败: %v", err)
+		return
+	}
+	data, err := protocol.MarshalPacket(packet)
+	if err != nil {
+		log.Printf("序列化房间状态失败: %v", err)
+		return
+	}
+	for _, conn := range r.connections {
+		if err := conn.Send(data); err != nil {
+			log.Printf("发送房间状态到玩家 %d 失败: %v", conn.ID(), err)
+		}
+	}
+}
+
+func (r *Room) broadcastGameStart(countdownFrames int32) {
+	event := &gamev1.GameEvent{
+		Event: &gamev1.GameEvent_GameStart{
+			GameStart: &gamev1.GameStartEvent{
+				CountdownFrames: countdownFrames,
+			},
+		},
+	}
+	packet, err := protocol.NewGameEventPacket(r.frameID, event)
+	if err != nil {
+		log.Printf("构造游戏开始事件失败: %v", err)
+		return
+	}
+	data, err := protocol.MarshalPacket(packet)
+	if err != nil {
+		log.Printf("序列化游戏开始事件失败: %v", err)
+		return
+	}
+	for _, conn := range r.connections {
+		if err := conn.Send(data); err != nil {
+			log.Printf("发送游戏开始到玩家 %d 失败: %v", conn.ID(), err)
+		}
 	}
 }
 
@@ -435,23 +805,70 @@ func (r *Room) handleGameOver(winnerID int32) {
 }
 
 func (r *Room) resetRoom() {
-	// 关闭所有连接并通知客户端游戏结束
-	r.closeAllConnections(true)
+	if r.legacyMode {
+		// 关闭所有连接并通知客户端游戏结束
+		r.closeAllConnections(true)
 
-	r.game = core.NewGame(0)
+		r.game = core.NewGame(r.seed)
+		r.frameID = 0
+		r.state = StateWaiting
+		r.resetAt = time.Time{}
+		r.nextPlayerID = 1
+		r.aiControllers = make(map[int32]*ai.AIController)
+		r.connections = make(map[int32]Session)
+		r.inputQueue = make(map[int32]map[int32]InputData)
+		r.sendQueueFullAt = make(map[int32]time.Time)
+		r.lastProcessedInputSeq = make(map[int32]int32)
+		r.lastInput = make(map[int32]InputData)
+		r.lastPlayerDeadState = make(map[int32]bool)
+		r.readyStatus = make(map[int32]bool)
+		r.playerNames = make(map[int32]string)
+		r.playerCharacters = make(map[int32]core.CharacterType)
+		r.hostID = 0
+		r.roomName = ""
+
+		log.Println("房间已重置，等待新玩家加入")
+		return
+	}
+
+	// 非兼容房间：保留连接，重置游戏状态
+	oldAI := r.aiControllers
+	r.aiControllers = make(map[int32]*ai.AIController)
+	r.game = core.NewGame(r.seed)
 	r.frameID = 0
 	r.state = StateWaiting
 	r.resetAt = time.Time{}
-	r.nextPlayerID = 1
-	r.aiControllers = make(map[int32]*ai.AIController)
-	r.connections = make(map[int32]Session)
 	r.inputQueue = make(map[int32]map[int32]InputData)
 	r.sendQueueFullAt = make(map[int32]time.Time)
 	r.lastProcessedInputSeq = make(map[int32]int32)
 	r.lastInput = make(map[int32]InputData)
 	r.lastPlayerDeadState = make(map[int32]bool)
 
-	log.Println("房间已重置，等待新玩家加入")
+	for playerID := range r.connections {
+		charType := r.playerCharacters[playerID]
+		x, y := getSpawnPosition(int(playerID))
+		player := core.NewPlayer(int(playerID), x, y, charType)
+		r.game.AddPlayer(player)
+		r.readyStatus[playerID] = false
+	}
+
+	for playerID := range oldAI {
+		charType := r.playerCharacters[playerID]
+		x, y := getSpawnPosition(int(playerID))
+		player := core.NewPlayer(int(playerID), x, y, charType)
+		r.game.AddPlayer(player)
+		r.aiControllers[playerID] = ai.NewAIController(int(playerID))
+		r.readyStatus[playerID] = true
+	}
+
+	if r.hostID != 0 {
+		if _, ok := r.connections[r.hostID]; !ok {
+			r.transferHost()
+		}
+	}
+
+	r.broadcastRoomState()
+	log.Println("房间已重置，返回等待状态")
 }
 
 func (r *Room) closeAllConnections(notify bool) {
@@ -553,13 +970,13 @@ func (r *Room) BuildGameState() *gamev1.GameState {
 	}
 
 	return &gamev1.GameState{
-		FrameId:            r.frameID,
-		Phase:              protocol.CoreGameStateToProto(int(r.state)),
-		Players:            protoPlayers,
-		Bombs:              protoBombs,
-		Explosions:         protoExplosions,
-		TileChanges:        tileChanges,
-		LastProcessedSeq:   lastProcessedSeq,
+		FrameId:          r.frameID,
+		Phase:            protocol.CoreGameStateToProto(int(r.state)),
+		Players:          protoPlayers,
+		Bombs:            protoBombs,
+		Explosions:       protoExplosions,
+		TileChanges:      tileChanges,
+		LastProcessedSeq: lastProcessedSeq,
 	}
 }
 

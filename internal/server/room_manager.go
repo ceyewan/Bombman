@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"time"
 
@@ -74,8 +75,8 @@ func (m *RoomManager) cleanupEmptyRooms() {
 			continue // 不清理默认房间
 		}
 
-		// 检查房间是否为空且已结束
-		if len(room.connections) == 0 && room.state != StateRunning {
+		// 检查房间是否为空
+		if len(room.connections) == 0 {
 			log.Printf("清理空房间: %s", roomID)
 			room.Shutdown()
 			delete(m.rooms, roomID)
@@ -94,7 +95,12 @@ func (m *RoomManager) getOrCreateRoom(roomID string) *Room {
 
 	// 创建新房间
 	log.Printf("创建新房间: %s", roomID)
-	room := NewRoom(m.ctx, m.enableAI)
+	legacyMode := roomID == DefaultRoomID
+	seed := time.Now().UnixNano()
+	if legacyMode {
+		seed = 0
+	}
+	room := NewRoom(m.ctx, roomID, seed, m.enableAI, legacyMode)
 	m.rooms[roomID] = room
 
 	// 启动房间循环
@@ -108,16 +114,26 @@ func (m *RoomManager) getOrCreateRoom(roomID string) *Room {
 func (m *RoomManager) Join(session Session, req JoinEvent) error {
 	// 确定房间 ID
 	roomID := req.RoomID
-	if roomID == "" {
-		roomID = DefaultRoomID
+	switch roomID {
+	case "":
+		roomID = m.findAvailableRoom()
+		if roomID == "" {
+			roomID = m.CreateRoom()
+		}
+	case "CREATE":
+		roomID = m.CreateRoom()
+	default:
+		if !m.roomExists(roomID) {
+			return fmt.Errorf("房间 %s 不存在", roomID)
+		}
 	}
 
 	// 获取或创建房间
 	room := m.getOrCreateRoom(roomID)
 
 	// 检查房间是否已满
-	if len(room.connections) >= MaxPlayers {
-		return fmt.Errorf("房间 %s 已满 (%d/%d)", roomID, len(room.connections), MaxPlayers)
+	if len(room.connections)+len(room.aiControllers) >= MaxPlayers {
+		return fmt.Errorf("房间 %s 已满 (%d/%d)", roomID, len(room.connections)+len(room.aiControllers), MaxPlayers)
 	}
 
 	// 检查房间状态
@@ -136,6 +152,79 @@ func (m *RoomManager) Join(session Session, req JoinEvent) error {
 
 	log.Printf("玩家 %d 加入房间 %s", session.ID(), roomID)
 	return nil
+}
+
+// findAvailableRoom 查找可加入的房间
+func (m *RoomManager) findAvailableRoom() string {
+	m.roomMutex.RLock()
+	defer m.roomMutex.RUnlock()
+
+	for roomID, room := range m.rooms {
+		if roomID == DefaultRoomID {
+			continue
+		}
+		if room.state == StateWaiting && len(room.connections)+len(room.aiControllers) < MaxPlayers {
+			return roomID
+		}
+	}
+	return ""
+}
+
+// roomExists 检查房间是否存在
+func (m *RoomManager) roomExists(roomID string) bool {
+	m.roomMutex.RLock()
+	defer m.roomMutex.RUnlock()
+	_, ok := m.rooms[roomID]
+	return ok
+}
+
+// GetRoomList 获取房间列表
+func (m *RoomManager) GetRoomList() []*gamev1.RoomInfo {
+	m.roomMutex.RLock()
+	defer m.roomMutex.RUnlock()
+
+	roomIDs := make([]string, 0, len(m.rooms))
+	for roomID := range m.rooms {
+		roomIDs = append(roomIDs, roomID)
+	}
+	sort.Strings(roomIDs)
+
+	list := make([]*gamev1.RoomInfo, 0, len(roomIDs))
+	for _, roomID := range roomIDs {
+		room := m.rooms[roomID]
+		if roomID == DefaultRoomID {
+			continue
+		}
+		status := gamev1.RoomStatus_ROOM_STATUS_WAITING
+		if room.state == StateRunning || room.state == StateEnding {
+			status = gamev1.RoomStatus_ROOM_STATUS_PLAYING
+		}
+		name := room.roomName
+		if name == "" {
+			name = roomID
+		}
+		list = append(list, &gamev1.RoomInfo{
+			Id:             roomID,
+			Name:           name,
+			CurrentPlayers: int32(len(room.connections)),
+			AiCount:        int32(len(room.aiControllers)),
+			MaxPlayers:     MaxPlayers,
+			Status:         status,
+			HostName:       room.playerNames[room.hostID],
+		})
+	}
+	return list
+}
+
+// HandleRoomAction 处理房间操作
+func (m *RoomManager) HandleRoomAction(roomID string, playerID int32, action *gamev1.RoomAction) error {
+	m.roomMutex.RLock()
+	room, exists := m.rooms[roomID]
+	m.roomMutex.RUnlock()
+	if !exists {
+		return fmt.Errorf("房间 %s 不存在", roomID)
+	}
+	return room.HandleRoomAction(playerID, action)
 }
 
 // EnqueueInput 将输入放入对应房间的队列

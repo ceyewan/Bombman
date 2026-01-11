@@ -232,6 +232,13 @@ func (s *GameServer) handleReconnect(conn Session, req *ReconnectEvent) {
 		return
 	}
 
+	if roomID == "" {
+		conn.SetPlayerID(-1)
+		conn.SetRoomID("")
+		s.sendReconnectResponse(conn, true, "", nil)
+		return
+	}
+
 	if s.roomManager == nil {
 		s.sendReconnectResponse(conn, false, "房间未初始化", nil)
 		return
@@ -241,7 +248,9 @@ func (s *GameServer) handleReconnect(conn Session, req *ReconnectEvent) {
 	currentState, err := s.roomManager.ReconnectPlayer(conn.ID(), playerID, roomID, conn)
 	if err != nil {
 		log.Printf("重连失败: 玩家 %d: %v", playerID, err)
-		s.sendReconnectResponse(conn, false, err.Error(), nil)
+		conn.SetPlayerID(-1)
+		conn.SetRoomID("")
+		s.sendReconnectResponse(conn, true, "房间已关闭，返回大厅", nil)
 		return
 	}
 
@@ -251,6 +260,103 @@ func (s *GameServer) handleReconnect(conn Session, req *ReconnectEvent) {
 
 	log.Printf("玩家 %d 重连成功", playerID)
 	s.sendReconnectResponse(conn, true, "", currentState)
+}
+
+// handleRoomListRequest 处理房间列表请求
+func (s *GameServer) handleRoomListRequest(conn Session, req *RoomListEvent) {
+	if s.roomManager == nil {
+		return
+	}
+	rooms := s.roomManager.GetRoomList()
+	total := int32(len(rooms))
+
+	page := int32(1)
+	pageSize := int32(20)
+	if req != nil {
+		if req.Page > 0 {
+			page = req.Page
+		}
+		if req.PageSize > 0 {
+			pageSize = req.PageSize
+		}
+	}
+
+	start := (page - 1) * pageSize
+	if start < 0 {
+		start = 0
+	}
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+
+	sliced := rooms[start:end]
+	packet, err := protocol.NewRoomListResponsePacket(sliced, total)
+	if err != nil {
+		log.Printf("构造房间列表响应失败: %v", err)
+		return
+	}
+	data, err := protocol.MarshalPacket(packet)
+	if err != nil {
+		log.Printf("序列化房间列表响应失败: %v", err)
+		return
+	}
+	if err := conn.Send(data); err != nil {
+		log.Printf("发送房间列表响应失败: %v", err)
+	}
+}
+
+// handleRoomAction 处理房间操作
+func (s *GameServer) handleRoomAction(conn Session, req *RoomActionEvent) {
+	if req == nil || req.Action == nil {
+		s.sendRoomActionResponse(conn, false, "房间操作为空", "", conn.GetRoomID())
+		return
+	}
+	if s.roomManager == nil {
+		s.sendRoomActionResponse(conn, false, "房间未初始化", "", conn.GetRoomID())
+		return
+	}
+	roomID := conn.GetRoomID()
+	if roomID == "" {
+		s.sendRoomActionResponse(conn, false, "未加入房间", "", "")
+		return
+	}
+
+	err := s.roomManager.HandleRoomAction(roomID, conn.ID(), req.Action)
+	if err != nil {
+		s.sendRoomActionResponse(conn, false, err.Error(), "", roomID)
+		return
+	}
+
+	newToken := ""
+	newRoomID := roomID
+	if req.Action.Type == gamev1.RoomActionType_ROOM_ACTION_LEAVE {
+		newRoomID = ""
+		token, err := GenerateSessionToken(0, "")
+		if err == nil {
+			newToken = token
+		}
+	}
+	s.sendRoomActionResponse(conn, true, "", newToken, newRoomID)
+}
+
+func (s *GameServer) sendRoomActionResponse(conn Session, success bool, errMsg string, sessionToken string, roomID string) {
+	packet, err := protocol.NewRoomActionResponsePacket(success, errMsg, sessionToken, roomID)
+	if err != nil {
+		log.Printf("构造房间操作响应失败: %v", err)
+		return
+	}
+	data, err := protocol.MarshalPacket(packet)
+	if err != nil {
+		log.Printf("序列化房间操作响应失败: %v", err)
+		return
+	}
+	if err := conn.Send(data); err != nil {
+		log.Printf("发送房间操作响应失败: %v", err)
+	}
 }
 
 // sendReconnectResponse 发送重连响应

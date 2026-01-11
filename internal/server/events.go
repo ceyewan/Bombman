@@ -1,5 +1,9 @@
 package server
 
+import (
+	gamev1 "bomberman/api/gen/bomberman/v1"
+)
+
 type EventKind int
 
 const (
@@ -9,6 +13,8 @@ const (
 	EventPing
 	EventPong
 	EventReconnect
+	EventRoomList
+	EventRoomAction
 )
 
 type InputData struct {
@@ -21,9 +27,9 @@ type InputData struct {
 }
 
 type JoinEvent struct {
-	PlayerName  string
-	CharacterID int32
-	RoomID      string // 房间 ID，空字符串表示自动分配到默认房间
+	PlayerName string
+	Character  gamev1.CharacterType
+	RoomID     string // 房间 ID，空字符串表示自动分配到默认房间
 }
 
 type InputEvent struct {
@@ -47,11 +53,22 @@ type ReconnectEvent struct {
 	SessionToken string
 }
 
+type RoomListEvent struct {
+	Page     int32
+	PageSize int32
+}
+
+type RoomActionEvent struct {
+	Action *gamev1.RoomAction
+}
+
 type ServerEvent struct {
-	Kind      EventKind
-	Join      *JoinEvent
-	Input     *InputEvent
-	Ping      *PingEvent
-	Pong      *PongEvent
-	Reconnect *ReconnectEvent
+	Kind       EventKind
+	Join       *JoinEvent
+	Input      *InputEvent
+	Ping       *PingEvent
+	Pong       *PongEvent
+	Reconnect  *ReconnectEvent
+	RoomList   *RoomListEvent
+	RoomAction *RoomActionEvent
 }

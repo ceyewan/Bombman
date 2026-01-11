@@ -38,11 +38,13 @@ type NetworkClient struct {
 	proto      string
 
 	// 玩家信息
-	playerID     int32
-	character    core.CharacterType
-	gameSeed     int64
-	tps          int32
-	sessionToken string // 会话令牌，用于重连
+	playerID      int32
+	character     core.CharacterType
+	gameSeed      int64
+	tps           int32
+	sessionToken  string // 会话令牌，用于重连
+	playerName    string
+	currentRoomID string
 
 	// 网络
 	connected bool
@@ -55,6 +57,9 @@ type NetworkClient struct {
 	eventChan         chan *gamev1.GameEvent
 	joinRespChan      chan *gamev1.JoinResponse
 	reconnectRespChan chan *gamev1.ReconnectResponse
+	roomListChan      chan *gamev1.RoomListResponse
+	roomStateChan     chan *gamev1.RoomStateUpdate
+	roomActionChan    chan *gamev1.RoomActionResponse
 
 	// 发送队列
 	inputSeq        int32
@@ -85,12 +90,17 @@ func NewNetworkClient(serverAddr, proto string, character core.CharacterType) *N
 		serverAddr:        serverAddr,
 		proto:             proto,
 		character:         character,
+		playerID:          -1,
+		playerName:        "Player",
 		ctx:               ctx,
 		cancel:            cancel,
 		stateChan:         make(chan *gamev1.GameState, 256),
 		eventChan:         make(chan *gamev1.GameEvent, 64),
 		joinRespChan:      make(chan *gamev1.JoinResponse, 1),
 		reconnectRespChan: make(chan *gamev1.ReconnectResponse, 1),
+		roomListChan:      make(chan *gamev1.RoomListResponse, 4),
+		roomStateChan:     make(chan *gamev1.RoomStateUpdate, 8),
+		roomActionChan:    make(chan *gamev1.RoomActionResponse, 4),
 		sendChan:          make(chan []byte, 256),
 		errChan:           make(chan error, 1),
 		rttSamples:        make([]int64, rttSampleWindow),
@@ -125,38 +135,7 @@ func (nc *NetworkClient) Connect() error {
 	nc.wg.Add(1)
 	go nc.pingLoop()
 
-	// 发送加入请求
-	if err := nc.sendJoinRequest(); err != nil {
-		nc.Close()
-		return fmt.Errorf("发送加入请求失败: %w", err)
-	}
-
-	// 等待加入响应
-	select {
-	case resp := <-nc.joinRespChan:
-		if resp == nil {
-			nc.Close()
-			return errors.New("加入响应为空")
-		}
-		if !resp.Success {
-			nc.Close()
-			return fmt.Errorf("加入失败: %s", resp.ErrorMessage)
-		}
-		nc.playerID = resp.PlayerId
-		nc.gameSeed = resp.GameSeed
-		nc.tps = resp.Tps
-		nc.sessionToken = resp.SessionToken
-		log.Printf("玩家 ID: %d", nc.playerID)
-		return nil
-
-	case err := <-nc.errChan:
-		nc.Close()
-		return err
-
-	case <-time.After(10 * time.Second):
-		nc.Close()
-		return errors.New("等待加入响应超时")
-	}
+	return nil
 }
 
 func (nc *NetworkClient) dial() (net.Conn, error) {
@@ -191,7 +170,7 @@ func (nc *NetworkClient) dialKCP() (net.Conn, error) {
 	}
 	// 配置 KCP 参数以获得更低延迟
 	// kcp.DialWithOptions 返回的就是 *kcp.UDPSession
-	conn.SetStreamMode(true) // 使用流模式处理消息边界
+	conn.SetStreamMode(true)     // 使用流模式处理消息边界
 	conn.SetNoDelay(1, 10, 2, 1) // nodelay=1, interval=10ms, resend=2, nc=1
 	conn.SetWindowSize(128, 128)
 	conn.SetMtu(1400)
@@ -221,6 +200,9 @@ func (nc *NetworkClient) Close() {
 	close(nc.eventChan)
 	close(nc.joinRespChan)
 	close(nc.reconnectRespChan)
+	close(nc.roomListChan)
+	close(nc.roomStateChan)
+	close(nc.roomActionChan)
 	close(nc.sendChan)
 	close(nc.errChan)
 
@@ -243,6 +225,83 @@ func (nc *NetworkClient) GetTPS() int32 {
 // IsConnected 检查是否已连接
 func (nc *NetworkClient) IsConnected() bool {
 	return nc.connected
+}
+
+// JoinRoom 加入房间
+func (nc *NetworkClient) JoinRoom(roomID string) (*gamev1.JoinResponse, error) {
+	if !nc.connected {
+		return nil, errors.New("未连接到服务器")
+	}
+
+	for {
+		select {
+		case <-nc.joinRespChan:
+			continue
+		default:
+		}
+		break
+	}
+
+	if err := nc.sendJoinRequest(roomID); err != nil {
+		return nil, fmt.Errorf("发送加入请求失败: %w", err)
+	}
+
+	select {
+	case resp := <-nc.joinRespChan:
+		if resp == nil {
+			return nil, errors.New("加入响应为空")
+		}
+		if !resp.Success {
+			return nil, fmt.Errorf("加入失败: %s", resp.ErrorMessage)
+		}
+		nc.playerID = resp.PlayerId
+		nc.gameSeed = resp.GameSeed
+		nc.tps = resp.Tps
+		nc.sessionToken = resp.SessionToken
+		nc.currentRoomID = resp.RoomId
+		log.Printf("加入房间成功: %s (玩家 %d)", resp.RoomId, nc.playerID)
+		return resp, nil
+
+	case err := <-nc.errChan:
+		return nil, err
+
+	case <-time.After(10 * time.Second):
+		return nil, errors.New("等待加入响应超时")
+	}
+}
+
+// RequestRoomList 请求房间列表
+func (nc *NetworkClient) RequestRoomList(page, pageSize int32) error {
+	packet, err := protocol.NewRoomListRequestPacket(page, pageSize)
+	if err != nil {
+		return err
+	}
+	data, err := protocol.MarshalPacket(packet)
+	if err != nil {
+		return err
+	}
+	return nc.sendMessage(data)
+}
+
+// SendRoomAction 发送房间操作
+func (nc *NetworkClient) SendRoomAction(action *gamev1.RoomAction) error {
+	packet, err := protocol.NewRoomActionPacket(action)
+	if err != nil {
+		return err
+	}
+	data, err := protocol.MarshalPacket(packet)
+	if err != nil {
+		return err
+	}
+	return nc.sendMessage(data)
+}
+
+// LeaveRoom 离开房间
+func (nc *NetworkClient) LeaveRoom() error {
+	action := &gamev1.RoomAction{
+		Type: gamev1.RoomActionType_ROOM_ACTION_LEAVE,
+	}
+	return nc.SendRoomAction(action)
 }
 
 // ========== 消息接收 ==========
@@ -356,6 +415,49 @@ func (nc *NetworkClient) handleMessage(data []byte) error {
 		}
 		return nil
 
+	case gamev1.MessageType_MESSAGE_TYPE_ROOM_LIST_RESPONSE:
+		resp, err := protocol.ParseRoomListResponse(pkt)
+		if err != nil {
+			return fmt.Errorf("解析房间列表失败: %w", err)
+		}
+		select {
+		case nc.roomListChan <- resp:
+		default:
+		}
+		return nil
+
+	case gamev1.MessageType_MESSAGE_TYPE_ROOM_ACTION_RESPONSE:
+		resp, err := protocol.ParseRoomActionResponse(pkt)
+		if err != nil {
+			return fmt.Errorf("解析房间操作响应失败: %w", err)
+		}
+		if resp.SessionToken != "" {
+			nc.sessionToken = resp.SessionToken
+		}
+		nc.currentRoomID = resp.RoomId
+		if resp.RoomId == "" {
+			nc.playerID = -1
+		}
+		select {
+		case nc.roomActionChan <- resp:
+		default:
+		}
+		return nil
+
+	case gamev1.MessageType_MESSAGE_TYPE_ROOM_STATE_UPDATE:
+		update, err := protocol.ParseRoomStateUpdate(pkt)
+		if err != nil {
+			return fmt.Errorf("解析房间状态失败: %w", err)
+		}
+		if update.RoomId != "" {
+			nc.currentRoomID = update.RoomId
+		}
+		select {
+		case nc.roomStateChan <- update:
+		default:
+		}
+		return nil
+
 	default:
 		return fmt.Errorf("未知消息类型: %v", pkt.Type)
 	}
@@ -396,9 +498,9 @@ func (nc *NetworkClient) sendLoop() {
 }
 
 // sendJoinRequest 发送加入请求
-func (nc *NetworkClient) sendJoinRequest() error {
+func (nc *NetworkClient) sendJoinRequest(roomID string) error {
 	protoCharType := protocol.CoreCharacterTypeToProto(nc.character)
-	packet, err := protocol.NewJoinRequestPacket("Player", protoCharType)
+	packet, err := protocol.NewJoinRequestPacket(nc.playerName, protoCharType, roomID)
 	if err != nil {
 		return err
 	}
@@ -582,6 +684,36 @@ func (nc *NetworkClient) ReceiveEvent() *gamev1.GameEvent {
 	select {
 	case event := <-nc.eventChan:
 		return event
+	default:
+		return nil
+	}
+}
+
+// ReceiveRoomList 接收房间列表（非阻塞）
+func (nc *NetworkClient) ReceiveRoomList() *gamev1.RoomListResponse {
+	select {
+	case resp := <-nc.roomListChan:
+		return resp
+	default:
+		return nil
+	}
+}
+
+// ReceiveRoomState 接收房间状态（非阻塞）
+func (nc *NetworkClient) ReceiveRoomState() *gamev1.RoomStateUpdate {
+	select {
+	case update := <-nc.roomStateChan:
+		return update
+	default:
+		return nil
+	}
+}
+
+// ReceiveRoomActionResponse 接收房间操作响应（非阻塞）
+func (nc *NetworkClient) ReceiveRoomActionResponse() *gamev1.RoomActionResponse {
+	select {
+	case resp := <-nc.roomActionChan:
+		return resp
 	default:
 		return nil
 	}
@@ -784,4 +916,3 @@ func (nc *NetworkClient) GetSessionToken() string {
 func (nc *NetworkClient) CanReconnect() bool {
 	return nc.sessionToken != ""
 }
-

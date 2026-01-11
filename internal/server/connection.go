@@ -280,6 +280,12 @@ func (c *Connection) handleMessage(data []byte) error {
 	case EventReconnect:
 		c.server.handleReconnect(c, event.Reconnect)
 
+	case EventRoomList:
+		c.server.handleRoomListRequest(c, event.RoomList)
+
+	case EventRoomAction:
+		c.server.handleRoomAction(c, event.RoomAction)
+
 	default:
 		return fmt.Errorf("未知消息类型")
 	}

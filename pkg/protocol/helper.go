@@ -44,10 +44,11 @@ func NewClientInputPacketWithInputs(seq int32, inputs []*gamev1.InputData) (*gam
 }
 
 // NewJoinRequestPacket 构造加入请求消息包
-func NewJoinRequestPacket(playerName string, characterType gamev1.CharacterType) (*gamev1.Packet, error) {
+func NewJoinRequestPacket(playerName string, characterType gamev1.CharacterType, roomID string) (*gamev1.Packet, error) {
 	req := &gamev1.JoinRequest{
 		PlayerName: playerName,
 		Character:  characterType,
+		RoomId:     roomID,
 	}
 
 	payload, err := proto.Marshal(req)
@@ -57,6 +58,37 @@ func NewJoinRequestPacket(playerName string, characterType gamev1.CharacterType)
 
 	return &gamev1.Packet{
 		Type:    gamev1.MessageType_MESSAGE_TYPE_JOIN_REQUEST,
+		Payload: payload,
+	}, nil
+}
+
+// NewRoomListRequestPacket 构造房间列表请求消息包
+func NewRoomListRequestPacket(page, pageSize int32) (*gamev1.Packet, error) {
+	req := &gamev1.RoomListRequest{
+		Page:     page,
+		PageSize: pageSize,
+	}
+
+	payload, err := proto.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+
+	return &gamev1.Packet{
+		Type:    gamev1.MessageType_MESSAGE_TYPE_ROOM_LIST_REQUEST,
+		Payload: payload,
+	}, nil
+}
+
+// NewRoomActionPacket 构造房间操作消息包
+func NewRoomActionPacket(action *gamev1.RoomAction) (*gamev1.Packet, error) {
+	payload, err := proto.Marshal(action)
+	if err != nil {
+		return nil, err
+	}
+
+	return &gamev1.Packet{
+		Type:    gamev1.MessageType_MESSAGE_TYPE_ROOM_ACTION,
 		Payload: payload,
 	}, nil
 }
@@ -81,7 +113,7 @@ func NewPingPacket(clientTime int64) (*gamev1.Packet, error) {
 // ========== 服务器消息构造 ==========
 
 // NewJoinResponsePacket 构造加入响应消息包
-func NewJoinResponsePacket(success bool, playerId int32, errorMessage string, gameSeed int64, tps int32, sessionToken string) (*gamev1.Packet, error) {
+func NewJoinResponsePacket(success bool, playerId int32, errorMessage string, gameSeed int64, tps int32, sessionToken string, roomID string, roomState *gamev1.RoomStateUpdate) (*gamev1.Packet, error) {
 	resp := &gamev1.JoinResponse{
 		Success:      success,
 		PlayerId:     playerId,
@@ -89,6 +121,8 @@ func NewJoinResponsePacket(success bool, playerId int32, errorMessage string, ga
 		GameSeed:     gameSeed,
 		Tps:          tps,
 		SessionToken: sessionToken,
+		RoomId:       roomID,
+		RoomState:    roomState,
 	}
 
 	payload, err := proto.Marshal(resp)
@@ -98,6 +132,57 @@ func NewJoinResponsePacket(success bool, playerId int32, errorMessage string, ga
 
 	return &gamev1.Packet{
 		Type:    gamev1.MessageType_MESSAGE_TYPE_JOIN_RESPONSE,
+		Payload: payload,
+	}, nil
+}
+
+// NewRoomListResponsePacket 构造房间列表响应消息包
+func NewRoomListResponsePacket(rooms []*gamev1.RoomInfo, total int32) (*gamev1.Packet, error) {
+	resp := &gamev1.RoomListResponse{
+		Rooms: rooms,
+		Total: total,
+	}
+
+	payload, err := proto.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return &gamev1.Packet{
+		Type:    gamev1.MessageType_MESSAGE_TYPE_ROOM_LIST_RESPONSE,
+		Payload: payload,
+	}, nil
+}
+
+// NewRoomActionResponsePacket 构造房间操作响应消息包
+func NewRoomActionResponsePacket(success bool, errorMessage string, sessionToken string, roomID string) (*gamev1.Packet, error) {
+	resp := &gamev1.RoomActionResponse{
+		Success:      success,
+		ErrorMessage: errorMessage,
+		SessionToken: sessionToken,
+		RoomId:       roomID,
+	}
+
+	payload, err := proto.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return &gamev1.Packet{
+		Type:    gamev1.MessageType_MESSAGE_TYPE_ROOM_ACTION_RESPONSE,
+		Payload: payload,
+	}, nil
+}
+
+// NewRoomStateUpdatePacket 构造房间状态更新消息包
+func NewRoomStateUpdatePacket(update *gamev1.RoomStateUpdate) (*gamev1.Packet, error) {
+	payload, err := proto.Marshal(update)
+	if err != nil {
+		return nil, err
+	}
+
+	return &gamev1.Packet{
+		Type:    gamev1.MessageType_MESSAGE_TYPE_ROOM_STATE_UPDATE,
 		Payload: payload,
 	}, nil
 }
@@ -233,6 +318,34 @@ func ParseJoinRequest(pkt *gamev1.Packet) (*gamev1.JoinRequest, error) {
 	return req, nil
 }
 
+// ParseRoomListRequest 从 Packet 中解析 RoomListRequest
+func ParseRoomListRequest(pkt *gamev1.Packet) (*gamev1.RoomListRequest, error) {
+	if pkt.Type != gamev1.MessageType_MESSAGE_TYPE_ROOM_LIST_REQUEST {
+		return nil, errors.New("not a room list request message")
+	}
+
+	req := &gamev1.RoomListRequest{}
+	err := proto.Unmarshal(pkt.Payload, req)
+	if err != nil {
+		return nil, err
+	}
+	return req, nil
+}
+
+// ParseRoomAction 从 Packet 中解析 RoomAction
+func ParseRoomAction(pkt *gamev1.Packet) (*gamev1.RoomAction, error) {
+	if pkt.Type != gamev1.MessageType_MESSAGE_TYPE_ROOM_ACTION {
+		return nil, errors.New("not a room action message")
+	}
+
+	action := &gamev1.RoomAction{}
+	err := proto.Unmarshal(pkt.Payload, action)
+	if err != nil {
+		return nil, err
+	}
+	return action, nil
+}
+
 // ParsePing 从 Packet 中解析 Ping
 func ParsePing(pkt *gamev1.Packet) (*gamev1.Ping, error) {
 	if pkt.Type != gamev1.MessageType_MESSAGE_TYPE_PING {
@@ -245,6 +358,48 @@ func ParsePing(pkt *gamev1.Packet) (*gamev1.Ping, error) {
 		return nil, err
 	}
 	return ping, nil
+}
+
+// ParseRoomListResponse 从 Packet 中解析 RoomListResponse
+func ParseRoomListResponse(pkt *gamev1.Packet) (*gamev1.RoomListResponse, error) {
+	if pkt.Type != gamev1.MessageType_MESSAGE_TYPE_ROOM_LIST_RESPONSE {
+		return nil, errors.New("not a room list response message")
+	}
+
+	resp := &gamev1.RoomListResponse{}
+	err := proto.Unmarshal(pkt.Payload, resp)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+// ParseRoomActionResponse 从 Packet 中解析 RoomActionResponse
+func ParseRoomActionResponse(pkt *gamev1.Packet) (*gamev1.RoomActionResponse, error) {
+	if pkt.Type != gamev1.MessageType_MESSAGE_TYPE_ROOM_ACTION_RESPONSE {
+		return nil, errors.New("not a room action response message")
+	}
+
+	resp := &gamev1.RoomActionResponse{}
+	err := proto.Unmarshal(pkt.Payload, resp)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+// ParseRoomStateUpdate 从 Packet 中解析 RoomStateUpdate
+func ParseRoomStateUpdate(pkt *gamev1.Packet) (*gamev1.RoomStateUpdate, error) {
+	if pkt.Type != gamev1.MessageType_MESSAGE_TYPE_ROOM_STATE_UPDATE {
+		return nil, errors.New("not a room state update message")
+	}
+
+	update := &gamev1.RoomStateUpdate{}
+	err := proto.Unmarshal(pkt.Payload, update)
+	if err != nil {
+		return nil, err
+	}
+	return update, nil
 }
 
 // ParseGameState 从 Packet 中解析 GameState

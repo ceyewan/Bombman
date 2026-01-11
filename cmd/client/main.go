@@ -19,6 +19,7 @@ func main() {
 	proto := flag.String("proto", "tcp", "服务器协议: tcp 或 kcp")
 	character := flag.Int("character", 0, "角色类型 (0=白, 1=黑, 2=红, 3=蓝)")
 	control := flag.String("control", "wasd", "控制方案 (wasd 或 arrow)")
+	quick := flag.Bool("quick", false, "兼容模式：跳过大厅，直接加入默认房间")
 	flag.Parse()
 
 	// 解析角色类型
@@ -79,13 +80,20 @@ func main() {
 		defer networkClient.Close()
 		setupSignalHandler(networkClient)
 
-		var err error
-		game, err = client.NewNetworkGameClient(networkClient, controlScheme)
-		if err != nil {
-			log.Fatalf("创建联机游戏失败: %v", err)
+		if *quick {
+			if _, err := networkClient.JoinRoom("default"); err != nil {
+				log.Fatalf("加入默认房间失败: %v", err)
+			}
+			var err error
+			game, err = client.NewNetworkGameClient(networkClient, controlScheme)
+			if err != nil {
+				log.Fatalf("创建联机游戏失败: %v", err)
+			}
+			title = "Bomberman - 联机模式 [" + *proto + "] [" + *serverAddr + "] [" + charType.String() + "] [" + controlScheme.String() + "]"
+		} else {
+			game = client.NewLobbyClient(networkClient, controlScheme)
+			title = "Bomberman - 大厅 [" + *proto + "] [" + *serverAddr + "] [" + charType.String() + "] [" + controlScheme.String() + "]"
 		}
-
-		title = "Bomberman - 联机模式 [" + *proto + "] [" + *serverAddr + "] [" + charType.String() + "] [" + controlScheme.String() + "]"
 	}
 
 	ebiten.SetWindowTitle(title)

@@ -38,6 +38,21 @@ enum TileType {
   TILE_TYPE_DOOR = 4; // 门 (隐藏在砖块下，炸开后出现)
 }
 
+enum RoomStatus {
+  ROOM_STATUS_UNSPECIFIED = 0;
+  ROOM_STATUS_WAITING = 1; // 等待中，可加入
+  ROOM_STATUS_PLAYING = 2; // 游戏中
+}
+
+enum RoomActionType {
+  ROOM_ACTION_UNSPECIFIED = 0;
+  ROOM_ACTION_LEAVE = 1; // 离开房间 -> 大厅
+  ROOM_ACTION_READY = 2; // 准备/取消准备
+  ROOM_ACTION_START = 3; // 开始游戏 (房主)
+  ROOM_ACTION_ADD_AI = 4; // 添加 AI (房主)
+  ROOM_ACTION_KICK = 5; // 踢人 (房主)
+}
+
 // ========== 客户端消息 ==========
 
 message InputData {
@@ -59,7 +74,28 @@ message ClientInput {
 message JoinRequest {
   string player_name = 1;
   CharacterType character = 2;
-  string room_id = 3; // 房间 ID，空字符串表示自动分配到默认房间
+  // room_id 语义：
+  // - ""        : 快速匹配（找一个 WAITING 且未满的房间，或创建新房间）
+  // - "CREATE"  : 强制创建新房间
+  // - "default" : 兼容模式（旧行为）
+  // - "room_xxx": 加入指定房间
+  string room_id = 3;
+}
+
+// 获取房间列表
+message RoomListRequest {
+  int32 page = 1;
+  int32 page_size = 2; // 默认 20
+}
+
+// 房间操作
+message RoomAction {
+  RoomActionType type = 1;
+
+  // 可选参数
+  bool ready = 2; // READY: true=准备, false=取消
+  int32 ai_count = 3; // ADD_AI: 添加数量
+  int32 target_player = 4; // KICK: 目标玩家
 }
 
 // Ping-Pong 消息，用于测量延迟和时间同步，对表
@@ -86,6 +122,53 @@ message JoinResponse {
 
   // 会话信息（用于重连）
   string session_token = 10; // 会话令牌（JWT），5 分钟有效
+
+  // 房间信息
+  string room_id = 11; // 实际加入的房间 ID
+  RoomStateUpdate room_state = 12; // 房间当前状态
+}
+
+// 房间列表响应
+message RoomListResponse {
+  repeated RoomInfo rooms = 1;
+  int32 total = 2;
+}
+
+// 房间信息
+message RoomInfo {
+  string id = 1;
+  string name = 2;
+  int32 current_players = 3;
+  int32 ai_count = 4;
+  int32 max_players = 5;
+  RoomStatus status = 6;
+  string host_name = 7;
+}
+
+// 房间操作响应
+message RoomActionResponse {
+  bool success = 1;
+  string error_message = 2;
+  string session_token = 3;
+  string room_id = 4;
+}
+
+// 房间状态更新
+message RoomStateUpdate {
+  string room_id = 1;
+  RoomStatus status = 2;
+  repeated RoomPlayer players = 3;
+  int32 host_id = 4;
+}
+
+// 房间内玩家信息
+message RoomPlayer {
+  int32 id = 1;
+  string name = 2;
+  CharacterType character = 3;
+  bool is_ready = 4;
+  bool is_host = 5;
+  bool is_ai = 6;
 }
 
 // 完整游戏状态（定期发送或客户端请求）
@@ -201,6 +284,7 @@ message GameEvent {
     BombExplodedEvent bomb_exploded = 6; // 炸弹爆炸
     GameStartEvent game_start = 7; // 游戏开始
     GameOverEvent game_over = 8; // 游戏结束
+    RoomStateUpdate room_update = 10; // 房间状态变更
   }
 }
 
@@ -252,6 +336,8 @@ enum MessageType {
   MESSAGE_TYPE_CLIENT_INPUT = 2;
   MESSAGE_TYPE_PING = 3;
   MESSAGE_TYPE_RECONNECT_REQUEST = 4;
+  MESSAGE_TYPE_ROOM_LIST_REQUEST = 20;
+  MESSAGE_TYPE_ROOM_ACTION = 22;
 
   // 服务器 -> 客户端
   MESSAGE_TYPE_JOIN_RESPONSE = 10;
@@ -259,4 +345,7 @@ enum MessageType {
   MESSAGE_TYPE_GAME_EVENT = 12;
   MESSAGE_TYPE_PONG = 13;
   MESSAGE_TYPE_RECONNECT_RESPONSE = 14;
+  MESSAGE_TYPE_ROOM_LIST_RESPONSE = 21;
+  MESSAGE_TYPE_ROOM_ACTION_RESPONSE = 23;
+  MESSAGE_TYPE_ROOM_STATE_UPDATE = 24;
 }

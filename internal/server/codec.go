@@ -23,9 +23,9 @@ func DecodePacket(data []byte) (*ServerEvent, error) {
 		return &ServerEvent{
 			Kind: EventJoin,
 			Join: &JoinEvent{
-				PlayerName:  req.PlayerName,
-				CharacterID: int32(req.Character),
-				RoomID:      req.RoomId,
+				PlayerName: req.PlayerName,
+				Character:  req.Character,
+				RoomID:     req.RoomId,
 			},
 		}, nil
 
@@ -81,6 +81,31 @@ func DecodePacket(data []byte) (*ServerEvent, error) {
 		return &ServerEvent{
 			Kind:      EventReconnect,
 			Reconnect: &ReconnectEvent{SessionToken: req.SessionToken},
+		}, nil
+
+	case gamev1.MessageType_MESSAGE_TYPE_ROOM_LIST_REQUEST:
+		req, err := protocol.ParseRoomListRequest(pkt)
+		if err != nil {
+			return nil, err
+		}
+		return &ServerEvent{
+			Kind: EventRoomList,
+			RoomList: &RoomListEvent{
+				Page:     req.Page,
+				PageSize: req.PageSize,
+			},
+		}, nil
+
+	case gamev1.MessageType_MESSAGE_TYPE_ROOM_ACTION:
+		action, err := protocol.ParseRoomAction(pkt)
+		if err != nil {
+			return nil, err
+		}
+		return &ServerEvent{
+			Kind: EventRoomAction,
+			RoomAction: &RoomActionEvent{
+				Action: action,
+			},
 		}, nil
 
 	default:
