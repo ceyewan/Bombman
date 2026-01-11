@@ -71,6 +71,7 @@ type NetworkClient struct {
 	lastServerTimeMs    int64
 	lastServerFramePong int32
 	lastRTTMs           int64
+	lastPacketTime      atomic.Value // time.Time
 
 	// RTT 统计（用于自适应调整）
 	rttSamples     []int64 // RTT 采样窗口
@@ -120,6 +121,7 @@ func (nc *NetworkClient) Connect() error {
 
 	nc.conn = conn
 	nc.connected = true
+	nc.lastPacketTime.Store(time.Now()) // 初始化最后收包时间
 
 	log.Printf("已连接到服务器: %s", conn.RemoteAddr())
 
@@ -134,6 +136,10 @@ func (nc *NetworkClient) Connect() error {
 	// 启动 Ping 循环
 	nc.wg.Add(1)
 	go nc.pingLoop()
+
+	// 启动健康检查循环
+	nc.wg.Add(1)
+	go nc.checkHealthLoop()
 
 	return nil
 }
@@ -180,6 +186,16 @@ func (nc *NetworkClient) dialKCP() (net.Conn, error) {
 
 // Close 关闭连接
 func (nc *NetworkClient) Close() {
+	nc.closeConn()
+
+	// 等待所有 goroutine 结束
+	nc.wg.Wait()
+
+	log.Printf("网络客户端已关闭")
+}
+
+// closeConn 关闭连接但不等待 goroutine（内部使用，避免死锁）
+func (nc *NetworkClient) closeConn() {
 	if !nc.connected {
 		return
 	}
@@ -191,22 +207,6 @@ func (nc *NetworkClient) Close() {
 	if nc.conn != nil {
 		nc.conn.Close()
 	}
-
-	// 等待所有 goroutine 结束
-	nc.wg.Wait()
-
-	// 关闭通道
-	close(nc.stateChan)
-	close(nc.eventChan)
-	close(nc.joinRespChan)
-	close(nc.reconnectRespChan)
-	close(nc.roomListChan)
-	close(nc.roomStateChan)
-	close(nc.roomActionChan)
-	close(nc.sendChan)
-	close(nc.errChan)
-
-	log.Printf("网络客户端已关闭")
 }
 
 // GetPlayerID 获取玩家 ID
@@ -311,47 +311,67 @@ func (nc *NetworkClient) receiveLoop() {
 	defer nc.wg.Done()
 
 	for {
+		// 先检查 ctx 是否已取消
 		select {
 		case <-nc.ctx.Done():
 			return
-
 		default:
-			// 读取消息长度（4 字节）
-			var length uint32
-			if err := binary.Read(nc.conn, binary.BigEndian, &length); err != nil {
-				if !errors.Is(err, io.EOF) {
-					nc.errChan <- fmt.Errorf("读取长度失败: %w", err)
-				}
-				return
-			}
+		}
 
-			// 检查消息大小
-			if length > MaxPacketSize {
-				nc.errChan <- fmt.Errorf("消息过大 (%d bytes)", length)
-				return
-			}
+		// 设置读取超时，让 goroutine 有机会检查 ctx
+		// 这是解决 "阻塞在 binary.Read 导致 wg.Wait 卡死" 的关键
+		nc.conn.SetReadDeadline(time.Now().Add(1 * time.Second))
 
-			if length == 0 {
+		// 读取消息长度（4 字节）
+		var length uint32
+		if err := binary.Read(nc.conn, binary.BigEndian, &length); err != nil {
+			// 超时不是错误，继续循环以检查 ctx
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue
 			}
-
-			// 读取消息体
-			data := make([]byte, length)
-			if _, err := io.ReadFull(nc.conn, data); err != nil {
-				nc.errChan <- fmt.Errorf("读取数据失败: %w", err)
-				return
+			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+				select {
+				case nc.errChan <- fmt.Errorf("读取长度失败: %w", err):
+				default:
+				}
 			}
+			return
+		}
 
-			// 处理消息
-			if err := nc.handleMessage(data); err != nil {
-				log.Printf("处理消息失败: %v", err)
+		// 检查消息大小
+		if length > MaxPacketSize {
+			select {
+			case nc.errChan <- fmt.Errorf("消息过大 (%d bytes)", length):
+			default:
 			}
+			return
+		}
+
+		if length == 0 {
+			continue
+		}
+
+		// 读取消息体
+		data := make([]byte, length)
+		if _, err := io.ReadFull(nc.conn, data); err != nil {
+			select {
+			case nc.errChan <- fmt.Errorf("读取数据失败: %w", err):
+			default:
+			}
+			return
+		}
+
+		// 处理消息
+		if err := nc.handleMessage(data); err != nil {
+			log.Printf("处理消息失败: %v", err)
 		}
 	}
 }
 
 // handleMessage 处理接收到的消息
 func (nc *NetworkClient) handleMessage(data []byte) error {
+	nc.lastPacketTime.Store(time.Now())
+
 	pkt, err := protocol.UnmarshalPacket(data)
 	if err != nil {
 		return fmt.Errorf("反序列化失败: %w", err)
@@ -485,12 +505,14 @@ func (nc *NetworkClient) sendLoop() {
 			length := uint32(len(data))
 			if err := binary.Write(nc.conn, binary.BigEndian, length); err != nil {
 				log.Printf("发送长度失败: %v", err)
+				nc.closeConn() // 使用 closeConn 避免死锁
 				return
 			}
 
 			// 发送数据体
 			if _, err := nc.conn.Write(data); err != nil {
 				log.Printf("发送数据失败: %v", err)
+				nc.closeConn() // 使用 closeConn 避免死锁
 				return
 			}
 		}
@@ -816,50 +838,58 @@ func (nc *NetworkClient) Reconnect() (*gamev1.GameState, error) {
 		return nil, errors.New("没有会话令牌，无法重连")
 	}
 
-	log.Printf("正在重连到服务器 (KCP)...")
+	log.Printf("[重连] 开始重连流程...")
 
-	// 关闭旧连接但保留状态
+	// 1. 关闭旧连接，等待所有 goroutine 结束
+	log.Printf("[重连] 关闭旧连接...")
 	nc.connected = false
 	nc.cancel()
 	if nc.conn != nil {
 		nc.conn.Close()
 	}
 	nc.wg.Wait()
+	log.Printf("[重连] 旧连接已关闭，所有 goroutine 已退出")
 
-	// 创建新的上下文
-	ctx, cancel := context.WithCancel(context.Background())
-	nc.ctx = ctx
-	nc.cancel = cancel
+	// 2. 重置所有内部状态（关键修复！）
+	nc.resetInternalState()
+	log.Printf("[重连] 内部状态已重置")
 
-	// 重新建立连接（重连时使用 KCP）
+	// 3. 重新建立连接（重连时使用 KCP）
+	log.Printf("[重连] 正在建立 KCP 连接到 %s...", nc.serverAddr)
 	conn, err := nc.dialKCP()
 	if err != nil {
 		return nil, fmt.Errorf("重连失败: %w", err)
 	}
 	nc.conn = conn
 	nc.connected = true
+	nc.lastPacketTime.Store(time.Now()) // 重置最后收包时间
 
-	log.Printf("已重连到服务器 (KCP): %s", conn.RemoteAddr())
+	log.Printf("[重连] KCP 连接已建立: %s", conn.RemoteAddr())
 
-	// 启动接收循环
+	// 4. 启动工作 goroutine
 	nc.wg.Add(1)
 	go nc.receiveLoop()
 
-	// 启动发送循环
 	nc.wg.Add(1)
 	go nc.sendLoop()
 
-	// 启动 Ping 循环
 	nc.wg.Add(1)
 	go nc.pingLoop()
 
-	// 发送重连请求
+	nc.wg.Add(1)
+	go nc.checkHealthLoop()
+
+	log.Printf("[重连] 工作协程已启动")
+
+	// 5. 发送重连请求
+	log.Printf("[重连] 发送重连请求 (token: %s...)", nc.sessionToken[:min(8, len(nc.sessionToken))])
 	if err := nc.sendReconnectRequest(); err != nil {
 		nc.Close()
 		return nil, fmt.Errorf("发送重连请求失败: %w", err)
 	}
 
-	// 等待重连响应
+	// 6. 等待重连响应
+	log.Printf("[重连] 等待服务器响应...")
 	select {
 	case resp := <-nc.reconnectRespChan:
 		if resp == nil {
@@ -870,7 +900,7 @@ func (nc *NetworkClient) Reconnect() (*gamev1.GameState, error) {
 			nc.Close()
 			return nil, fmt.Errorf("重连失败: %s", resp.ErrorMessage)
 		}
-		log.Printf("重连成功 (KCP)，玩家 ID: %d", nc.playerID)
+		log.Printf("[重连] 重连成功！玩家 ID: %d", nc.playerID)
 		return resp.CurrentState, nil
 
 	case err := <-nc.errChan:
@@ -880,6 +910,127 @@ func (nc *NetworkClient) Reconnect() (*gamev1.GameState, error) {
 	case <-time.After(10 * time.Second):
 		nc.Close()
 		return nil, errors.New("等待重连响应超时")
+	}
+}
+
+// resetInternalState 重置所有内部状态，用于重连前的清理
+// 这是解决"状态残留"问题的关键函数
+func (nc *NetworkClient) resetInternalState() {
+	// 1. 重建 context（已在 Reconnect 中创建）
+	ctx, cancel := context.WithCancel(context.Background())
+	nc.ctx = ctx
+	nc.cancel = cancel
+
+	// 2. 清空并重建所有通道（避免旧数据干扰）
+	// 使用 drain 模式清空旧通道中的残留数据
+	nc.drainChannels()
+
+	// 3. 重建通道（确保干净的状态）
+	nc.stateChan = make(chan *gamev1.GameState, 256)
+	nc.eventChan = make(chan *gamev1.GameEvent, 64)
+	nc.joinRespChan = make(chan *gamev1.JoinResponse, 1)
+	nc.reconnectRespChan = make(chan *gamev1.ReconnectResponse, 1)
+	nc.roomListChan = make(chan *gamev1.RoomListResponse, 4)
+	nc.roomStateChan = make(chan *gamev1.RoomStateUpdate, 8)
+	nc.roomActionChan = make(chan *gamev1.RoomActionResponse, 4)
+	nc.sendChan = make(chan []byte, 256)
+	nc.errChan = make(chan error, 1)
+
+	// 4. 重置输入序列号（重要！服务器会忽略过期的序列号）
+	nc.inputSeq = 0
+	nc.lastServerFrame = 0
+
+	// 5. 重置 RTT 统计
+	nc.rttSamples = make([]int64, rttSampleWindow)
+	nc.rttIndex = 0
+	nc.rttSampleCount = 0
+	nc.lastRTTMs = 0
+
+	// 6. 重置时间同步
+	nc.timeOffsetMs = 0
+	nc.lastServerTimeMs = 0
+	nc.lastServerFramePong = 0
+
+	// 7. 重建 stats logger
+	if nc.statsLogger != nil {
+		nc.statsLogger.Stop()
+	}
+	nc.statsLogger = time.NewTicker(statsLogInterval)
+}
+
+// drainChannels 清空所有通道中的残留数据
+func (nc *NetworkClient) drainChannels() {
+	// 使用非阻塞读取清空通道
+	for {
+		select {
+		case <-nc.stateChan:
+		default:
+			goto drainEvent
+		}
+	}
+drainEvent:
+	for {
+		select {
+		case <-nc.eventChan:
+		default:
+			goto drainJoin
+		}
+	}
+drainJoin:
+	for {
+		select {
+		case <-nc.joinRespChan:
+		default:
+			goto drainReconnect
+		}
+	}
+drainReconnect:
+	for {
+		select {
+		case <-nc.reconnectRespChan:
+		default:
+			goto drainRoomList
+		}
+	}
+drainRoomList:
+	for {
+		select {
+		case <-nc.roomListChan:
+		default:
+			goto drainRoomState
+		}
+	}
+drainRoomState:
+	for {
+		select {
+		case <-nc.roomStateChan:
+		default:
+			goto drainRoomAction
+		}
+	}
+drainRoomAction:
+	for {
+		select {
+		case <-nc.roomActionChan:
+		default:
+			goto drainSend
+		}
+	}
+drainSend:
+	for {
+		select {
+		case <-nc.sendChan:
+		default:
+			goto drainErr
+		}
+	}
+drainErr:
+	for {
+		select {
+		case <-nc.errChan:
+		default:
+			return
+		}
 	}
 }
 
@@ -915,4 +1066,40 @@ func (nc *NetworkClient) GetSessionToken() string {
 // CanReconnect 检查是否可以重连
 func (nc *NetworkClient) CanReconnect() bool {
 	return nc.sessionToken != ""
+}
+
+// checkHealthLoop 定期检查连接健康状态
+func (nc *NetworkClient) checkHealthLoop() {
+	defer nc.wg.Done()
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	// 5 秒没收到包视为断线 (与服务器 readTimeout 保持一致或稍长)
+	timeout := 5 * time.Second
+
+	for {
+		select {
+		case <-nc.ctx.Done():
+			return
+		case <-ticker.C:
+			lastTime, ok := nc.lastPacketTime.Load().(time.Time)
+			if !ok {
+				continue
+			}
+			if time.Since(lastTime) > timeout {
+				log.Printf("心跳超时 (上次收包: %v)，断开连接", lastTime.Format("15:04:05.000"))
+
+				// 只有在已连接状态下才报错，避免重复
+				if nc.connected {
+					select {
+					case nc.errChan <- fmt.Errorf("connection timeout"):
+					default:
+					}
+					nc.closeConn() // 使用 closeConn 避免死锁
+				}
+				return
+			}
+		}
+	}
 }

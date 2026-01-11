@@ -15,6 +15,11 @@ import (
 	"bomberman/pkg/protocol"
 )
 
+const (
+	// OfflinePlayerTimeout 离线玩家保留时间，超时后强制移除
+	OfflinePlayerTimeout = 60 * time.Second
+)
+
 type Room struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -37,6 +42,9 @@ type Room struct {
 	sendQueueFullAt map[int32]time.Time
 	lastInput       map[int32]InputData
 
+	// 离线玩家（断线保护），记录断线时间
+	offlinePlayers map[int32]time.Time
+
 	// 客户端预测支持：记录每个玩家最后处理的输入序号
 	lastProcessedInputSeq map[int32]int32
 
@@ -50,16 +58,23 @@ type Room struct {
 	playerCharacters map[int32]core.CharacterType
 	roomName         string
 
-	joinCh   chan joinRequest
-	inputCh  chan inputEvent
-	leaveCh  chan int32
-	actionCh chan roomActionRequest
+	joinCh      chan joinRequest
+	reconnectCh chan reconnectRequest // 新增重连请求通道
+	inputCh     chan inputEvent
+	leaveCh     chan int32
+	actionCh    chan roomActionRequest
 }
 
 type joinRequest struct {
 	conn   Session
 	req    JoinEvent
 	respCh chan error
+}
+
+type reconnectRequest struct {
+	playerID int32
+	conn     Session
+	respCh   chan bool // true=成功, false=失败
 }
 
 type inputEvent struct {
@@ -92,12 +107,14 @@ func NewRoom(parent context.Context, roomID string, seed int64, enableAI bool, l
 		inputQueue:            make(map[int32]map[int32]InputData),
 		sendQueueFullAt:       make(map[int32]time.Time),
 		lastInput:             make(map[int32]InputData),
+		offlinePlayers:        make(map[int32]time.Time),
 		lastProcessedInputSeq: make(map[int32]int32),
 		lastPlayerDeadState:   make(map[int32]bool),
 		readyStatus:           make(map[int32]bool),
 		playerNames:           make(map[int32]string),
 		playerCharacters:      make(map[int32]core.CharacterType),
 		joinCh:                make(chan joinRequest),
+		reconnectCh:           make(chan reconnectRequest), // 初始化
 		inputCh:               make(chan inputEvent, 256),
 		leaveCh:               make(chan int32, 256),
 		actionCh:              make(chan roomActionRequest, 64),
@@ -121,6 +138,9 @@ func (r *Room) Run(wg *sync.WaitGroup) {
 
 		case req := <-r.joinCh:
 			r.handleJoin(req)
+
+		case req := <-r.reconnectCh: // 处理重连请求
+			r.handleReconnect(req)
 
 		case ev := <-r.inputCh:
 			r.handleInput(ev)
@@ -232,6 +252,14 @@ func (r *Room) tick() {
 
 	if r.state == StateRunning {
 		r.broadcastState()
+	}
+
+	// 清理超时离线玩家
+	for playerID, disconnectTime := range r.offlinePlayers {
+		if time.Since(disconnectTime) > OfflinePlayerTimeout {
+			log.Printf("玩家 %d 离线超时 (%v)，强制移除", playerID, OfflinePlayerTimeout)
+			r.handleForceLeave(playerID)
+		}
 	}
 }
 
@@ -459,25 +487,73 @@ func (r *Room) handleInput(ev inputEvent) {
 	}
 }
 
+// handleLeave 处理玩家离开（网络断开或超时）
+// 默认为软删除（断线保护），除非超时
 func (r *Room) handleLeave(playerID int32) {
-	conn, isHuman := r.connections[playerID]
-	_, isAI := r.aiControllers[playerID]
+	// 如果是 AI，直接硬删除
+	if _, isAI := r.aiControllers[playerID]; isAI {
+		r.handleForceLeave(playerID)
+		return
+	}
+
+	// 如果玩家在线，转为离线状态
+	if conn, ok := r.connections[playerID]; ok {
+		log.Printf("玩家 %d 断线，进入保留状态", playerID)
+		r.offlinePlayers[playerID] = time.Now()
+		delete(r.connections, playerID)
+
+		// 清理连接相关但不清理游戏数据
+		delete(r.sendQueueFullAt, playerID)
+		conn.SetPlayerID(-1)
+		conn.SetRoomID("")
+
+		// 不广播 PlayerLeft，也不从 game.Players 移除
+		// 这样玩家在游戏中会停留在原地
+		return
+	}
+
+	// 如果玩家已经在离线列表中，什么都不做（等待超时）
+	if _, ok := r.offlinePlayers[playerID]; ok {
+		return
+	}
+}
+
+// IsEmpty 检查房间是否真正为空（包括离线保护中的玩家）
+// 注意：此方法从外部调用，不需要锁（Room 内部使用单线程模型）
+func (r *Room) IsEmpty() bool {
+	return len(r.connections) == 0 && len(r.offlinePlayers) == 0
+}
+
+// handleForceLeave 强制玩家离开（主动退出或超时）
+func (r *Room) handleForceLeave(playerID int32) {
+	isHuman := false
+	isAI := false
+
+	if conn, ok := r.connections[playerID]; ok {
+		isHuman = true
+		delete(r.connections, playerID)
+		conn.SetPlayerID(-1)
+		conn.SetRoomID("")
+	} else if _, ok := r.offlinePlayers[playerID]; ok {
+		isHuman = true
+		delete(r.offlinePlayers, playerID)
+	}
+
+	if _, ok := r.aiControllers[playerID]; ok {
+		isAI = true
+		delete(r.aiControllers, playerID)
+	}
+
 	if !isHuman && !isAI {
 		return
 	}
 
+	// 清理游戏数据
 	if isHuman {
-		delete(r.connections, playerID)
 		delete(r.inputQueue, playerID)
 		delete(r.sendQueueFullAt, playerID)
 		delete(r.lastProcessedInputSeq, playerID)
 		delete(r.lastInput, playerID)
-		conn.SetPlayerID(-1)
-		conn.SetRoomID("")
-	}
-
-	if isAI {
-		delete(r.aiControllers, playerID)
 	}
 
 	delete(r.readyStatus, playerID)
@@ -486,7 +562,7 @@ func (r *Room) handleLeave(playerID int32) {
 
 	r.removePlayerByID(playerID)
 
-	log.Printf("玩家 %d 离开，当前玩家数: %d", playerID, len(r.connections))
+	log.Printf("玩家 %d 彻底离开，当前玩家数: %d", playerID, len(r.connections))
 
 	if isHuman {
 		// 广播玩家离开事件
@@ -574,7 +650,7 @@ func (r *Room) handleRoomAction(req roomActionRequest) {
 			req.respCh <- errors.New("玩家不在房间中")
 			return
 		}
-		r.handleLeave(req.playerID)
+		r.handleForceLeave(req.playerID)
 
 	case gamev1.RoomActionType_ROOM_ACTION_KICK:
 		if req.playerID != r.hostID {
@@ -629,6 +705,7 @@ func (r *Room) startGame() {
 	r.lastInput = make(map[int32]InputData)
 	r.lastProcessedInputSeq = make(map[int32]int32)
 	r.lastPlayerDeadState = make(map[int32]bool)
+	r.offlinePlayers = make(map[int32]time.Time) // 清理离线玩家
 
 	r.broadcastRoomState()
 	r.broadcastGameStart(0)
@@ -843,6 +920,7 @@ func (r *Room) resetRoom() {
 	r.lastProcessedInputSeq = make(map[int32]int32)
 	r.lastInput = make(map[int32]InputData)
 	r.lastPlayerDeadState = make(map[int32]bool)
+	r.offlinePlayers = make(map[int32]time.Time)
 
 	for playerID := range r.connections {
 		charType := r.playerCharacters[playerID]
@@ -980,10 +1058,59 @@ func (r *Room) BuildGameState() *gamev1.GameState {
 	}
 }
 
-// ReplaceConnection 替换玩家的连接（用于重连）
-func (r *Room) ReplaceConnection(playerID int32, newConn Session) {
-	r.connections[playerID] = newConn
-	log.Printf("玩家 %d 的连接已替换", playerID)
+// TryReconnect 尝试重连玩家（线程安全）
+func (r *Room) TryReconnect(playerID int32, newConn Session) bool {
+	respCh := make(chan bool, 1)
+
+	select {
+	case <-r.ctx.Done():
+		return false
+	case r.reconnectCh <- reconnectRequest{
+		playerID: playerID,
+		conn:     newConn,
+		respCh:   respCh,
+	}:
+	}
+
+	select {
+	case <-r.ctx.Done():
+		return false
+	case success := <-respCh:
+		return success
+	}
+}
+
+func (r *Room) handleReconnect(req reconnectRequest) {
+	// 检查是否在线
+	if _, ok := r.connections[req.playerID]; ok {
+		// 玩家在线，替换连接
+		// 关闭旧连接（如果不相同）
+		if oldConn := r.connections[req.playerID]; oldConn != req.conn {
+			// 注意：这里只是替换引用，旧连接的关闭交由其自身的 loop 或外部逻辑处理
+			// 但为了避免旧连接继续接收数据，最好明确断开
+			// 不过这可能会导致并发问题，所以只替换引用是安全的
+		}
+		r.connections[req.playerID] = req.conn
+		log.Printf("玩家 %d 在线重连，连接已替换", req.playerID)
+		req.respCh <- true
+		return
+	}
+
+	// 检查是否离线保留中
+	if _, ok := r.offlinePlayers[req.playerID]; ok {
+		// 玩家离线，恢复连接
+		delete(r.offlinePlayers, req.playerID)
+		r.connections[req.playerID] = req.conn
+
+		// 重置相关的状态
+		delete(r.sendQueueFullAt, req.playerID)
+
+		log.Printf("玩家 %d 从离线状态重连成功", req.playerID)
+		req.respCh <- true
+		return
+	}
+
+	req.respCh <- false
 }
 
 const InputBufferFrames = 120

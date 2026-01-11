@@ -75,8 +75,8 @@ func (m *RoomManager) cleanupEmptyRooms() {
 			continue // 不清理默认房间
 		}
 
-		// 检查房间是否为空
-		if len(room.connections) == 0 {
+		// 检查房间是否为空（包括离线保护中的玩家）
+		if room.IsEmpty() {
 			log.Printf("清理空房间: %s", roomID)
 			room.Shutdown()
 			delete(m.rooms, roomID)
@@ -365,16 +365,13 @@ func (m *RoomManager) ReconnectPlayer(newConnID int32, playerID int32, roomID st
 		return nil, fmt.Errorf("房间 %s 不存在", roomID)
 	}
 
-	// 检查玩家是否在这个房间中
-	if _, exists := room.connections[playerID]; !exists {
-		return nil, fmt.Errorf("玩家 %d 不在房间 %s 中", playerID, roomID)
+	// 尝试重连 (支持在线替换和离线恢复)
+	if !room.TryReconnect(playerID, newConn) {
+		return nil, fmt.Errorf("玩家 %d 无法重连到房间 %s (可能不在房间中或已超时移除)", playerID, roomID)
 	}
 
 	// 获取当前游戏状态
 	currentState := room.BuildGameState()
-
-	// 替换连接
-	room.ReplaceConnection(playerID, newConn)
 
 	log.Printf("玩家 %d 在房间 %s 重连，新连接 ID: %d", playerID, roomID, newConnID)
 
