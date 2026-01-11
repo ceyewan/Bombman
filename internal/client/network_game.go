@@ -457,7 +457,9 @@ func (ngc *NetworkGameClient) handleNetworkEvents() {
 		switch e := event.Event.(type) {
 		case *gamev1.GameEvent_GameOver:
 			ngc.game.gameOver = true
-			log.Printf("游戏结束！获胜者: %d", e.GameOver.WinnerId)
+			winnerID := e.GameOver.WinnerId
+			message := ngc.formatGameOverMessage(winnerID)
+			ngc.game.SetGameOverMessage(message)
 		case *gamev1.GameEvent_PlayerLeft:
 			playerID := int(e.PlayerLeft.PlayerId)
 			if playerRenderer, exists := ngc.playersMap[playerID]; exists {
@@ -621,5 +623,27 @@ func (ngc *NetworkGameClient) tryReconnect() {
 	if state != nil {
 		ngc.applyServerState(state)
 	}
+}
+
+// formatGameOverMessage formats the game over message based on winner ID
+func (ngc *NetworkGameClient) formatGameOverMessage(winnerID int32) string {
+	if winnerID == -1 {
+		return "Draw!"
+	}
+
+	// Find winner name
+	for _, p := range ngc.game.coreGame.Players {
+		if int32(p.ID) == winnerID {
+			if winnerID == int32(ngc.playerID) {
+				return "You Win!"
+			}
+			return "Player " + string(rune('A'+p.ID)) + " Wins!"
+		}
+	}
+
+	if winnerID == int32(ngc.playerID) {
+		return "You Win!"
+	}
+	return "Player " + string(rune('A'+winnerID)) + " Wins!"
 }
 

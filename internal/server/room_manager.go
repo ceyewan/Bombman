@@ -114,17 +114,30 @@ func (m *RoomManager) getOrCreateRoom(roomID string) *Room {
 func (m *RoomManager) Join(session Session, req JoinEvent) error {
 	// 确定房间 ID
 	roomID := req.RoomID
-	switch roomID {
-	case "":
-		roomID = m.findAvailableRoom()
-		if roomID == "" {
+
+	// Handle CREATE:room_id format for custom room creation
+	if len(roomID) > 7 && roomID[:7] == "CREATE:" {
+		customID := roomID[7:]
+		if customID == "" {
+			// "CREATE:" with empty ID -> generate random
 			roomID = m.CreateRoom()
+		} else {
+			// Create with custom ID
+			roomID = m.CreateRoomWithID(customID)
 		}
-	case "CREATE":
-		roomID = m.CreateRoom()
-	default:
-		if !m.roomExists(roomID) {
-			return fmt.Errorf("房间 %s 不存在", roomID)
+	} else {
+		switch roomID {
+		case "":
+			roomID = m.findAvailableRoom()
+			if roomID == "" {
+				roomID = m.CreateRoom()
+			}
+		case "CREATE":
+			roomID = m.CreateRoom()
+		default:
+			if !m.roomExists(roomID) {
+				return fmt.Errorf("Room %s not found", roomID)
+			}
 		}
 	}
 
@@ -321,6 +334,24 @@ func (m *RoomManager) CreateRoom() string {
 	roomID := fmt.Sprintf("room_%d", time.Now().UnixNano())
 	m.getOrCreateRoom(roomID)
 	return roomID
+}
+
+// CreateRoomWithID creates a room with a custom ID
+func (m *RoomManager) CreateRoomWithID(customID string) string {
+	// Validate custom ID (alphanumeric, hyphen, underscore only)
+	valid := true
+	for _, r := range customID {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_') {
+			valid = false
+			break
+		}
+	}
+	if !valid {
+		// Fall back to random ID if invalid
+		return m.CreateRoom()
+	}
+	m.getOrCreateRoom(customID)
+	return customID
 }
 
 // ReconnectPlayer 玩家重连

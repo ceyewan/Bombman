@@ -597,15 +597,15 @@ func (r *Room) handleRoomAction(req roomActionRequest) {
 // CanStart 检查是否可以开始游戏
 func (r *Room) CanStart(requestorID int32) (bool, string) {
 	if r.state != StateWaiting {
-		return false, "游戏已开始"
+		return false, "Game already started"
 	}
 	if requestorID != r.hostID {
-		return false, "只有房主可以开始游戏"
+		return false, "Only host can start game"
 	}
 
 	totalPlayers := len(r.connections) + len(r.aiControllers)
 	if totalPlayers < 2 {
-		return false, "至少需要 2 名玩家"
+		return false, "Need at least 2 players"
 	}
 
 	for playerID := range r.connections {
@@ -613,7 +613,7 @@ func (r *Room) CanStart(requestorID int32) (bool, string) {
 			continue
 		}
 		if !r.readyStatus[playerID] {
-			return false, "有玩家未准备"
+			return false, "Some players not ready"
 		}
 	}
 
