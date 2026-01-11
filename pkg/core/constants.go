@@ -56,8 +56,9 @@ const (
 	AIStuckThresholdFrames      = 60 // 卡住判定 = 1秒 × 60
 
 	// 游戏流程
-	GameStartCountdownFrames = 180 // 开始倒计时：3秒
-	GameOverDelayFrames      = 300 // 结束延时：5秒
+	GameStartCountdownFrames = 180       // 开始倒计时：3秒
+	GameOverDelayFrames      = 300       // 结束延时：5秒
+	MatchDurationFrames      = 120 * TPS // 对局时长：2分钟（<=0 关闭限时）
 )
 
 // ===== 玩家碰撞配置 =====

@@ -196,15 +196,17 @@ func NewGameStatePacket(
 	explosions []*gamev1.ExplosionState,
 	tileChanges []*gamev1.TileChange,
 	lastProcessedSeq map[int32]int32,
+	matchEndFrame int32,
 ) (*gamev1.Packet, error) {
 	state := &gamev1.GameState{
-		FrameId:            frameId,
-		Phase:              phase,
-		Players:            players,
-		Bombs:              bombs,
-		Explosions:         explosions,
-		TileChanges:        tileChanges,
-		LastProcessedSeq:   lastProcessedSeq,
+		FrameId:          frameId,
+		Phase:            phase,
+		Players:          players,
+		Bombs:            bombs,
+		Explosions:       explosions,
+		TileChanges:      tileChanges,
+		LastProcessedSeq: lastProcessedSeq,
+		MatchEndFrame:    matchEndFrame,
 	}
 
 	payload, err := proto.Marshal(state)

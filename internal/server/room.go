@@ -28,10 +28,11 @@ type Room struct {
 
 	legacyMode bool
 
-	game    *core.Game
-	frameID int32
-	state   GameState
-	resetAt time.Time
+	game          *core.Game
+	frameID       int32
+	state         GameState
+	resetAt       time.Time
+	matchEndFrame int32
 
 	enableAI      bool
 	aiControllers map[int32]*ai.AIController
@@ -100,6 +101,7 @@ func NewRoom(parent context.Context, roomID string, seed int64, enableAI bool, l
 		game:                  core.NewGame(seed),
 		frameID:               0,
 		state:                 StateWaiting,
+		matchEndFrame:         0,
 		enableAI:              enableAI,
 		aiControllers:         make(map[int32]*ai.AIController),
 		connections:           make(map[int32]Session),
@@ -242,6 +244,10 @@ func (r *Room) tick() {
 
 	// 增加帧 ID（game.CurrentFrame 已在 Update 中递增）
 	r.frameID = r.game.CurrentFrame
+
+	if r.isMatchTimedOut() {
+		r.handleMatchTimeout()
+	}
 
 	// 检测玩家死亡状态变化并广播
 	r.checkAndBroadcastPlayerDeaths()
@@ -442,9 +448,7 @@ func (r *Room) handleJoin(req joinRequest) {
 
 	if r.legacyMode {
 		if r.state != StateRunning {
-			r.state = StateRunning
-			r.broadcastRoomState()
-			r.broadcastGameStart(0)
+			r.startGame()
 		}
 		if r.enableAI {
 			r.tryFillWithAI()
@@ -701,6 +705,7 @@ func (r *Room) startGame() {
 		return
 	}
 	r.state = StateRunning
+	r.initMatchTimer()
 	r.inputQueue = make(map[int32]map[int32]InputData)
 	r.lastInput = make(map[int32]InputData)
 	r.lastProcessedInputSeq = make(map[int32]int32)
@@ -709,6 +714,48 @@ func (r *Room) startGame() {
 
 	r.broadcastRoomState()
 	r.broadcastGameStart(0)
+}
+
+func (r *Room) initMatchTimer() {
+	if core.MatchDurationFrames <= 0 {
+		r.matchEndFrame = 0
+		return
+	}
+	r.matchEndFrame = r.game.CurrentFrame + core.MatchDurationFrames
+}
+
+func (r *Room) isMatchTimedOut() bool {
+	return r.matchEndFrame > 0 && r.frameID >= r.matchEndFrame
+}
+
+func (r *Room) handleMatchTimeout() {
+	if r.state != StateRunning {
+		return
+	}
+
+	for _, player := range r.game.Players {
+		player.Dead = true
+	}
+
+	r.spawnMatchEndExplosion()
+	r.handleGameOver(-1)
+}
+
+func (r *Room) spawnMatchEndExplosion() {
+	explosion := &core.Explosion{
+		CreatedAtFrame: r.frameID,
+		ExpiresAtFrame: r.frameID + core.BombExplosionFrames,
+		OwnerID:        -1,
+		Cells:          make([]core.GridPos, 0, core.MapWidth*core.MapHeight),
+	}
+
+	for y := 0; y < core.MapHeight; y++ {
+		for x := 0; x < core.MapWidth; x++ {
+			explosion.Cells = append(explosion.Cells, core.GridPos{GridX: x, GridY: y})
+		}
+	}
+
+	r.game.Explosions = append(r.game.Explosions, explosion)
 }
 
 func (r *Room) transferHost() {
@@ -890,6 +937,7 @@ func (r *Room) resetRoom() {
 		r.frameID = 0
 		r.state = StateWaiting
 		r.resetAt = time.Time{}
+		r.matchEndFrame = 0
 		r.nextPlayerID = 1
 		r.aiControllers = make(map[int32]*ai.AIController)
 		r.connections = make(map[int32]Session)
@@ -915,6 +963,7 @@ func (r *Room) resetRoom() {
 	r.frameID = 0
 	r.state = StateWaiting
 	r.resetAt = time.Time{}
+	r.matchEndFrame = 0
 	r.inputQueue = make(map[int32]map[int32]InputData)
 	r.sendQueueFullAt = make(map[int32]time.Time)
 	r.lastProcessedInputSeq = make(map[int32]int32)
@@ -990,6 +1039,7 @@ func (r *Room) broadcastState() {
 		protoExplosions,
 		tileChanges,
 		r.lastProcessedInputSeq,
+		r.matchEndFrame,
 	)
 	if err != nil {
 		log.Printf("构造游戏状态失败: %v", err)
@@ -1055,6 +1105,7 @@ func (r *Room) BuildGameState() *gamev1.GameState {
 		Explosions:       protoExplosions,
 		TileChanges:      tileChanges,
 		LastProcessedSeq: lastProcessedSeq,
+		MatchEndFrame:    r.matchEndFrame,
 	}
 }
 

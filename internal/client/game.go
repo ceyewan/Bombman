@@ -1,6 +1,7 @@
 package client
 
 import (
+	"fmt"
 	"image/color"
 	"time"
 
@@ -53,15 +54,18 @@ const (
 
 // Game 游戏主结构（Ebiten 游戏循环）
 type Game struct {
-	coreGame           *core.Game
-	players            []*Player
-	bombRenderers      []*BombRenderer
-	explosionRenderers []*ExplosionRenderer
-	mapRenderer        *MapRenderer
-	gameOver           bool
-	gameOverMessage    string
-	lastUpdateTime     time.Time
-	controlScheme      ControlScheme
+	coreGame            *core.Game
+	players             []*Player
+	bombRenderers       []*BombRenderer
+	explosionRenderers  []*ExplosionRenderer
+	mapRenderer         *MapRenderer
+	gameOver            bool
+	gameOverMessage     string
+	matchEndFrame       int32
+	countdownText       string
+	lastCountdownSecond int32
+	lastUpdateTime      time.Time
+	controlScheme       ControlScheme
 }
 
 // NewGame 创建新游戏
@@ -71,12 +75,13 @@ func NewGame() *Game {
 	coreGame := core.NewGame(time.Now().UnixNano())
 
 	g := &Game{
-		coreGame:           coreGame,
-		players:            make([]*Player, 0),
-		bombRenderers:      make([]*BombRenderer, 0),
-		explosionRenderers: make([]*ExplosionRenderer, 0),
-		lastUpdateTime:     time.Now(),
-		controlScheme:      selectedControl,
+		coreGame:            coreGame,
+		players:             make([]*Player, 0),
+		bombRenderers:       make([]*BombRenderer, 0),
+		explosionRenderers:  make([]*ExplosionRenderer, 0),
+		lastCountdownSecond: -1,
+		lastUpdateTime:      time.Now(),
+		controlScheme:       selectedControl,
 	}
 
 	g.mapRenderer = NewMapRenderer(coreGame.Map)
@@ -90,12 +95,13 @@ func NewGameWithSeed(seed int64) *Game {
 	coreGame := core.NewGame(seed)
 
 	g := &Game{
-		coreGame:           coreGame,
-		players:            make([]*Player, 0),
-		bombRenderers:      make([]*BombRenderer, 0),
-		explosionRenderers: make([]*ExplosionRenderer, 0),
-		lastUpdateTime:     time.Now(),
-		controlScheme:      selectedControl,
+		coreGame:            coreGame,
+		players:             make([]*Player, 0),
+		bombRenderers:       make([]*BombRenderer, 0),
+		explosionRenderers:  make([]*ExplosionRenderer, 0),
+		lastCountdownSecond: -1,
+		lastUpdateTime:      time.Now(),
+		controlScheme:       selectedControl,
 	}
 
 	g.mapRenderer = NewMapRenderer(coreGame.Map)
@@ -160,6 +166,8 @@ func (g *Game) syncRenderers() {
 
 // Draw 绘制游戏画面
 func (g *Game) Draw(screen *ebiten.Image) {
+	g.updateCountdownText()
+
 	// 绘制地图
 	g.mapRenderer.Draw(screen)
 
@@ -181,6 +189,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	// 游戏结束提示
 	if g.gameOver {
 		drawGameOverOverlay(screen, g.gameOverMessage)
+	} else if g.matchEndFrame > 0 {
+		drawCenteredText(screen, "TIME "+g.countdownText, ScreenWidth/2, 10, color.RGBA{230, 230, 230, 255})
 	}
 }
 
@@ -245,6 +255,23 @@ func drawGameOverOverlay(screen *ebiten.Image, message string) {
 		drawCenteredText(screen, message, ScreenWidth/2, messageY, color.RGBA{220, 230, 240, 255})
 	} else {
 		drawCenteredText(screen, "Press Enter to Continue", ScreenWidth/2, messageY, color.RGBA{150, 160, 175, 255})
+	}
+}
+
+func (g *Game) updateCountdownText() {
+	if g.matchEndFrame <= 0 || g.gameOver {
+		return
+	}
+
+	remaining := g.matchEndFrame - g.coreGame.CurrentFrame
+	if remaining < 0 {
+		remaining = 0
+	}
+
+	seconds := remaining / core.TPS
+	if seconds != g.lastCountdownSecond {
+		g.lastCountdownSecond = seconds
+		g.countdownText = fmt.Sprintf("%02d:%02d", seconds/60, seconds%60)
 	}
 }
 

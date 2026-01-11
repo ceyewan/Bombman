@@ -27,8 +27,8 @@ type NetworkGameClient struct {
 	lastAdaptiveUpdate time.Time
 
 	// 重连状态
-	reconnecting bool
-	reconnectDelay time.Duration
+	reconnecting         bool
+	reconnectDelay       time.Duration
 	lastReconnectAttempt time.Time
 }
 
@@ -151,6 +151,9 @@ func (ngc *NetworkGameClient) Layout(outsideWidth, outsideHeight int) (int, int)
 // applyServerState 应用服务器状态
 func (ngc *NetworkGameClient) applyServerState(state *gamev1.GameState) {
 	ngc.game.coreGame.CurrentFrame = state.FrameId
+	if state.MatchEndFrame > 0 {
+		ngc.game.matchEndFrame = state.MatchEndFrame
+	}
 
 	activePlayers := make(map[int]struct{}, len(state.Players))
 	serverTimeMs := ngc.network.EstimatedServerTimeMs()
@@ -646,4 +649,3 @@ func (ngc *NetworkGameClient) formatGameOverMessage(winnerID int32) string {
 	}
 	return "Player " + string(rune('A'+winnerID)) + " Wins!"
 }
-

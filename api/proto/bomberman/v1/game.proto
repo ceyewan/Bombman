@@ -185,6 +185,9 @@ message GameState {
 
   // 地图变化（增量）
   repeated TileChange tile_changes = 7;
+
+  // 对局结束帧（<=0 表示不启用限时）
+  int32 match_end_frame = 8;
 }
 
 // 增量状态更新（高频发送）
