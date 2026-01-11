@@ -1,4 +1,4 @@
-package ai2
+package ai
 
 import (
 	"container/list"

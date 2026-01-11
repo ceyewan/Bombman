@@ -1,4 +1,4 @@
-package ai2
+package ai
 
 // Status 节点执行状态
 type Status int

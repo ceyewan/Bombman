@@ -10,7 +10,7 @@ import (
 	"time"
 
 	gamev1 "bomberman/api/gen/bomberman/v1"
-	ai "bomberman/pkg/ai-2"
+	"bomberman/pkg/ai"
 	"bomberman/pkg/core"
 	"bomberman/pkg/protocol"
 )

@@ -3,7 +3,7 @@ package client
 import (
 	"image/color"
 
-	ai "bomberman/pkg/ai-2"
+	"bomberman/pkg/ai"
 	"bomberman/pkg/core"
 
 	"github.com/hajimehoshi/ebiten/v2"

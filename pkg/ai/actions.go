@@ -1,4 +1,4 @@
-package ai2
+package ai
 
 import (
 	"math"
@@ -22,14 +22,14 @@ func condCanPlaceBomb(bb *Blackboard) bool {
 		return false
 	}
 
-	// 检查当前已放置数量
+	// 检查当前已放置数量（AI 只允许同时存在 1 个炸弹）
 	activeBombs := 0
 	for _, b := range bb.Game.Bombs {
 		if b.OwnerID == bb.Player.ID && !b.Exploded {
 			activeBombs++
 		}
 	}
-	return activeBombs < bb.Player.MaxBombs
+	return activeBombs < 1
 }
 
 // === 动作节点 ===
@@ -144,15 +144,20 @@ func findNearestSafePos(bb *Blackboard) *core.GridPos {
 
 // actFindBrick 寻找可炸的砖块目标
 func actFindBrick(bb *Blackboard) Status {
-	// 如果已有目标，且目标仍然有效（还是空地，且旁边还有砖），则认为成功
+	// 如果已有目标，先验证目标是否仍有效
 	if bb.CurrentTarget != nil {
-		// 检查是否到达
-		pos := core.PlayerXYToGrid(int(bb.Player.X), int(bb.Player.Y))
-		if pos == *bb.CurrentTarget {
+		if isBrickAttackPosition(bb, *bb.CurrentTarget) {
+			// 检查是否到达
+			pos := core.PlayerXYToGrid(int(bb.Player.X), int(bb.Player.Y))
+			if pos == *bb.CurrentTarget {
+				return StatusSuccess
+			}
+			// 否则继续寻路（或者直接交给 MoveTo）
 			return StatusSuccess
 		}
-		// 否则继续寻路（或者直接交给 MoveTo）
-		return StatusSuccess
+		// 目标已失效（附近无砖/不可走/不安全），清空重新找
+		bb.CurrentTarget = nil
+		bb.Path = nil
 	}
 
 	// 搜索新的目标
@@ -180,17 +185,9 @@ func findBrickAttackPosition(bb *Blackboard) *core.GridPos {
 		current := queue[0]
 		queue = queue[1:]
 
-		// 检查当前点旁边是否有砖块
-		for _, d := range directions {
-			nx, ny := current.GridX+d.GridX, current.GridY+d.GridY
-			if bb.Game.Map.GetTile(nx, ny) == core.TileBrick {
-				// 找到了一个攻击点（current）
-				// 确保这个点是安全的（不在现有危险区）
-				if bb.Danger.IsSafe(current.GridX, current.GridY) {
-					result := current
-					return &result
-				}
-			}
+		if isBrickAttackPosition(bb, current) {
+			result := current
+			return &result
 		}
 
 		// 继续扩散
@@ -210,6 +207,27 @@ func findBrickAttackPosition(bb *Blackboard) *core.GridPos {
 		}
 	}
 	return nil
+}
+
+// isBrickAttackPosition 检查是否为有效的炸砖位置
+func isBrickAttackPosition(bb *Blackboard, pos core.GridPos) bool {
+	if !isValid(pos.GridX, pos.GridY) {
+		return false
+	}
+	if !isWalkable(bb.Game, pos) {
+		return false
+	}
+	if !bb.Danger.IsSafe(pos.GridX, pos.GridY) {
+		return false
+	}
+	directions := []core.GridPos{{GridX: 0, GridY: -1}, {GridX: 0, GridY: 1}, {GridX: -1, GridY: 0}, {GridX: 1, GridY: 0}}
+	for _, d := range directions {
+		nx, ny := pos.GridX+d.GridX, pos.GridY+d.GridY
+		if bb.Game.Map.GetTile(nx, ny) == core.TileBrick {
+			return true
+		}
+	}
+	return false
 }
 
 // actMoveToTarget 移动到当前目标
@@ -272,6 +290,11 @@ func actPlaceBomb(bb *Blackboard) Status {
 	}
 	currentPos := core.PlayerXYToGrid(int(bb.Player.X), int(bb.Player.Y))
 	if currentPos != *bb.CurrentTarget {
+		return StatusFailure
+	}
+	if !isBrickAttackPosition(bb, *bb.CurrentTarget) {
+		bb.CurrentTarget = nil
+		bb.Path = nil
 		return StatusFailure
 	}
 
