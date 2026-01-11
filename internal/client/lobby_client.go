@@ -467,7 +467,7 @@ func (lc *LobbyClient) drawLobby(screen *ebiten.Image) {
 		indicatorColor := uiTextSecondary
 		if i == lc.selectedIndex {
 			indicator = "> "
-			indicatorColor = uiAccent
+			indicatorColor = uiTextPrimary
 		}
 
 		// Room name with ID
@@ -662,13 +662,14 @@ func drawPanel(screen *ebiten.Image, x, y, width, height int) {
 	screen.DrawImage(panelImg, op)
 }
 
-// drawSelectionRect draws a selection highlight rectangle
+// drawSelectionRect draws a selection highlight rectangle with gray shadow
 func drawSelectionRect(screen *ebiten.Image, x, y, width, height int) {
 	selectionImg := ebiten.NewImage(width, height)
-	selectionImg.Fill(color.RGBA{255, 200, 80, 20})
+	// 半透明灰色背景阴影
+	selectionImg.Fill(color.RGBA{50, 55, 65, 180})
 
-	// Draw left accent bar
-	vector.DrawFilledRect(selectionImg, 0, 0, 3, float32(height), uiAccent, false)
+	// 左侧灰色指示条（不使用亮色）
+	vector.DrawFilledRect(selectionImg, 0, 0, 3, float32(height), color.RGBA{100, 110, 130, 255}, false)
 
 	op := &ebiten.DrawImageOptions{}
 	op.GeoM.Translate(float64(x), float64(y))
