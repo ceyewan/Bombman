@@ -311,8 +311,11 @@ func (lc *LobbyClient) updateGame() {
 	}
 	_ = lc.game.Update()
 	if lc.game.game.gameOver {
-		lc.game = nil
-		lc.screen = screenRoom
+		if lc.input.JustPressed(ebiten.KeySpace) || lc.input.JustPressed(ebiten.KeyEnter) {
+			lc.game = nil
+			lc.screen = screenRoom
+		}
+		return
 	}
 }
 

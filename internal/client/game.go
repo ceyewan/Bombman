@@ -227,6 +227,12 @@ func drawGameOverOverlay(screen *ebiten.Image, message string) {
 		overlayRect.Fill(color.RGBA{0, 0, 0, 0})
 	}
 
+	// Draw panel border using vector
+	vector.DrawFilledRect(panel, 0, 0, 2, float32(panelHeight), borderColor, false)
+	vector.DrawFilledRect(panel, float32(panelWidth-2), 0, 2, float32(panelHeight), borderColor, false)
+	vector.DrawFilledRect(panel, 0, 0, float32(panelWidth), 2, borderColor, false)
+	vector.DrawFilledRect(panel, 0, float32(panelHeight-2), float32(panelWidth), 2, borderColor, false)
+
 	// Draw panel to overlay
 	panelOp := &ebiten.DrawImageOptions{}
 	panelOp.GeoM.Translate(float64(panelX), float64(panelY))
@@ -234,16 +240,6 @@ func drawGameOverOverlay(screen *ebiten.Image, message string) {
 
 	// Draw overlay to screen
 	screen.DrawImage(overlay, nil)
-
-	// Draw panel border using vector
-	vector.DrawFilledRect(panel, 0, 0, 2, float32(panelHeight), borderColor, false)
-	vector.DrawFilledRect(panel, float32(panelWidth-2), 0, 2, float32(panelHeight), borderColor, false)
-	vector.DrawFilledRect(panel, 0, 0, float32(panelWidth), 2, borderColor, false)
-	vector.DrawFilledRect(panel, 0, float32(panelHeight-2), float32(panelWidth), 2, borderColor, false)
-
-	// Draw panel again with border
-	panelOp.GeoM.Translate(float64(panelX), float64(panelY))
-	screen.DrawImage(panel, panelOp)
 
 	// Draw "GAME OVER" title
 	titleY := panelY + 24
